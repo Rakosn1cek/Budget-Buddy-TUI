@@ -13,11 +13,14 @@ You must install Python 3 and the core package management tools using the Termux
 
 How to Get the Code
 You have two primary ways to download the budget_budy.py file into your Termux environment:
-Option 1: Using wget (Direct Download)
+Option 1: 
+*Using wget (Direct Download)
 If you have uploaded the file somewhere (like a personal cloud or gist) and have a direct download link (replace [YOUR_DIRECT_URL_HERE]):
-wget [YOUR_DIRECT_URL_HERE]/budget_budy.py
+wget[YOUR_DIRECT_URL_HERE]/budget_budy.py
 
-Option 2: Using git clone (Recommended for Hosting)
+Option 2: 
+*Using git clone (Recommended for Hosting)
+
 If you host this code in a repository (e.g., GitHub, GitLab), use git clone (replace [YOUR_REPOSITORY_URL]):
 git clone [YOUR_REPOSITORY_URL]
 cd budget-buddy-tui  # Change to the project directory
@@ -32,7 +35,7 @@ Final Installation Steps
    python budget_budy.py
 
 The application will automatically create two SQLite database files (expenses.db and settings.db) on the first run.
-Features
+Features: 
  * Financial Overview: Real-time calculation of total income, expenses, and net balance.
  * Transaction Management: Easy addition, viewing, and deletion of both income and expense transactions.
  * Detailed Reporting: Generate detailed Weekly and Monthly summaries broken down by category.
@@ -76,4 +79,5 @@ cd budget-buddy-tui
    python budget_budy.py
 
    (Note: Some systems may require python3 instead of python.)
+
 
