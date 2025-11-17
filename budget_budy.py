@@ -266,7 +266,9 @@ def display_dashboard(message=""):
 
     # 9. Print Message and Prompt
     if message:
-        CONSOLE.print(Panel(Text(message, style="bold yellow"), title="NOTIFICATION", border_style="yellow", width=87))
+        # FIX: Use Text.from_markup() to correctly parse the color tags in the message string
+        message_content = Text.from_markup(message)
+        CONSOLE.print(Panel(message_content, title="NOTIFICATION", border_style="yellow", width=87))
 
     return input("\nSelect an option (1-12): ")
 
@@ -889,7 +891,7 @@ def main():
         try:
             # We rely on string input for this loop, though some commands expect an int
             if choice.upper() == 'C':
-                message = "Action cancelled."
+                message = "[yellow]Action cancelled.[/yellow]"
                 continue
                 
             choice_int = int(choice)
