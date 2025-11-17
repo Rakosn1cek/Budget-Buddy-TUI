@@ -1,4 +1,5 @@
 💰 Budget Buddy TUI 💰
+
 A comprehensive, terminal-based personal budget and finance tracker built in Python using the rich library for a modern, colorful Text User Interface (TUI).
 ✨ Features at a Glance
 Category
