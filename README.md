@@ -1,53 +1,69 @@
-Budget Buddy TUI
-A comprehensive, terminal-based personal budget and finance tracker built in Python using the rich library for a modern, colorful Text User Interface (TUI). This application uses SQLite for reliable, persistent data storage.
-Features
-Budget Buddy TUI has evolved into a full-featured financial management tool, including:
-Core Transactions & Data
-Absolute Pathing: Data is stored persistently in ~/Budget-Buddy-TUI/expenses.db and ~/Budget-Buddy-TUI/settings.db, ensuring the application works correctly no matter which directory it's run from.
-Dual Transaction Types: Record both Income (I) and Expense (E).
-Detailed Logging: Transactions include amount, category, description, and the ability to input the date in DD-MM-YYYY format (defaults to today).
-Filtering: Filter transactions easily by specific category (Option 3).
-Category Management (NEW): View, add, and safely delete custom categories (Option 13). When deleting a category, associated transactions are automatically recategorized to "Uncategorized."
-Recurring Payments & Automation
-Recurring Templates (NEW): Create, manage, and delete templates for recurring monthly expenses (e.g., Rent, Bills, Subscriptions).
-Due Day Tracking: Each template specifies a "Due Day" (1-31) for accurate scheduling.
-Automated Application (NEW): On startup, the app automatically checks for and records any recurring payment that is due today and has not yet been applied this month.
-Manual Application: Manually apply a template to record an expense (Option 11).
+💰 Budget Buddy TUI 💰
+A comprehensive, terminal-based personal budget and finance tracker built in Python using the rich library for a modern, colorful Text User Interface (TUI).
+✨ Features at a Glance
+Category
+Feature
+Description
+Data & Core
+Persistent Storage
+Data is stored safely in fixed paths (~/Budget-Buddy-TUI/).
+
+
+Income & Expense
+Record both income (I) and expenses (E) with detailed tracking.
+
+
+Category Management
+✅ Add, view, and safely delete custom categories.
 Reporting & Planning
-Financial Dashboard: Provides an instant overview of Total Income, Total Expenses, and Net Balance (All Time).
-Weekly Summary (NEW): Generate a categorized breakdown of income and expenses for the current Monday-to-Sunday week (Option 4).
-Monthly Detailed Summary (NEW): Provides a comprehensive breakdown of Income, Expenses, and Net values per category for the current month (Option 5).
-Upcoming Calendar (NEW): Displays a calendar view of the current week, highlighting today's date and showing reminders for due recurring payments and recent major expenses (Option 6).
-Savings Goal Tracking
-Set Goal Target: Define a target amount for a personal savings goal (Option 8).
-Track Progress: The dashboard displays the progress toward the goal target.
-Add to Savings: Easily transfer funds from your net balance to your savings goal. This transfer is automatically recorded as an Expense under the "Savings Transfer" category to keep your primary balance accurate (Option 9).
-Setup and Running
+Dashboard Overview
+Instant Net Balance, Total Income, and Total Expense snapshot.
+
+
+Weekly/Monthly Reports
+Detailed, categorized summaries for your current week and month.
+
+
+Upcoming Calendar
+📅 View a calendar highlighting due dates for bills and major expenses.
+Automation & Savings
+Recurring Templates
+Set up templates with a defined Due Day (1-31) for easy bill tracking.
+
+
+Auto-Apply Payments
+Automatically records recurring payments on their due day upon startup.
+
+
+Savings Goal
+Track progress toward a custom savings target and transfer funds from your balance.
+
+🛠️ Setup and Running
 Prerequisites
 Python 3.x
-rich library for the TUI interface.
-Installation
-Clone the repository:
+rich library (install via pip install rich)
+🚀 Installation and Alias
+The application is designed to be run from any directory via a simple alias, ensuring data integrity.
+# 1. Clone the repository into the dedicated data folder:
 git clone [Your-Repo-URL] ~/Budget-Buddy-TUI
 cd ~/Budget-Buddy-TUI
 
-
-Install dependencies:
+# 2. Install the rich dependency:
 pip install rich
 
 
-Set up the Alias (bb): Add the following line to your shell's configuration file (e.g., ~/.bashrc, ~/.zshrc):
+🔗 Configure Alias
+Add the following line to your shell's configuration file (e.g., ~/.bashrc, ~/.zshrc):
 # Budget Buddy Alias
 alias bb='python3 ~/Budget-Buddy-TUI/budget_budy.py'
 
 
-Reload your shell configuration:
+Then, reload your shell configuration:
 source ~/.bashrc  # or source ~/.zshrc
 
 
-Usage
-Run the application from any directory using the alias:
+▶️ Usage
+Run the application from anywhere:
 bb
 
 
-The application will launch and load your data automatically from ~/Budget-Buddy-TUI/expenses.db and ~/Budget-Buddy-TUI/settings.db.
