@@ -925,7 +925,7 @@ def manage_recurring_templates():
         table.add_column("ID", style="dim", width=5)
         table.add_column("Due Day", style="yellow", width=8, justify="center") # New Column
         table.add_column("Name", style="bold white", width=20)
-        table.add_column("Amount", style="red", justify="right")
+        table.add_column("Amount", style="red", width=10, justify="right")
         table.add_column("Category", style="cyan", width=15)
         
         for tid, name, amount, category, desc, due_day in templates:
@@ -1062,10 +1062,10 @@ def apply_recurring_template():
     
     # Display templates for selection
     table = Table(title="Select Template", show_header=True, header_style="bold green")
-    table.add_column("ID", style="dim", width=5)
+    table.add_column("ID", style="dim", width=8)
     table.add_column("Due Day", style="yellow", width=8, justify="center")
     table.add_column("Name", style="bold white", width=20)
-    table.add_column("Amount", style="red", justify="right")
+    table.add_column("Amount", style="red", width=10)
     table.add_column("Category", style="cyan", width=15)
     
     template_map = {}
