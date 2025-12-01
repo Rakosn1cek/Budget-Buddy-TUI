@@ -7,6 +7,7 @@ from rich.panel import Panel
 from rich.text import Text
 from rich.table import Table
 from rich.progress import Progress, BarColumn, TextColumn
+VERSION="1.7.1" # <<--- Date string changed to %y-%m-%d due to problems with how dasboard was pulling expenses data. Fixed recurring transactions table width for id.
 
 # --- Configuration and Initialization ---
 
@@ -341,8 +342,8 @@ def validate_date(date_str):
         # If input is empty, default to today's date
         return datetime.datetime.now().date() 
     try:
-        # Attempt to parse as DD-MM-YYYY
-        dt_obj = datetime.datetime.strptime(date_str, "%d-%m-%Y")
+        # Attempt to parse as YYYY-MM-DD
+        dt_obj = datetime.datetime.strptime(date_str, "%Y-%m-%d")
         return dt_obj.date()
     except ValueError:
         return None
@@ -400,8 +401,8 @@ def add_transaction():
     # 4. Get Description
     description = input("Enter short description (optional): ").strip()
 
-    # 5. Get Date (Updated Feature for DD-MM-YYYY)
-    default_date = datetime.datetime.now().strftime("%d-%m-%Y")
+    # 5. Get Date (Updated Feature for YYYY-MM-DD)
+    default_date = datetime.datetime.now().strftime("%Y-%m-%d")
     while True:
         date_input = input(f"Enter Date (DD-MM-YYYY, default: {default_date}): ").strip()
         
@@ -425,7 +426,7 @@ def add_transaction():
     conn.close()
 
     # Display confirmation message with the user's preferred date format for feedback
-    display_date = dt_obj_or_none.strftime("%d-%m-%Y")
+    display_date = dt_obj_or_none.strftime("%Y-%m-%d")
     return f"[bold green]Successfully recorded {transaction_type.upper()} of £{amount:,.2f} under {category} on {display_date}.[/bold green]"
 
 def view_transactions(filter_query=None, title="Recent Expenses"):
@@ -922,7 +923,7 @@ def manage_recurring_templates():
 
     if templates:
         table = Table(title="Available Templates", show_header=True, header_style="bold orange1")
-        table.add_column("ID", style="dim", width=5)
+        table.add_column("ID", style="dim", width=7)
         table.add_column("Due Day", style="yellow", width=8, justify="center") # New Column
         table.add_column("Name", style="bold white", width=20)
         table.add_column("Amount", style="red", width=10, justify="right")
@@ -1062,8 +1063,8 @@ def apply_recurring_template():
     
     # Display templates for selection
     table = Table(title="Select Template", show_header=True, header_style="bold green")
-    table.add_column("ID", style="dim", width=8)
-    table.add_column("Due Day", style="yellow", width=8, justify="center")
+    table.add_column("ID", style="dim", width=7)
+    table.add_column("Due Day", style="yellow", width=7, justify="center")
     table.add_column("Name", style="bold white", width=20)
     table.add_column("Amount", style="red", width=10)
     table.add_column("Category", style="cyan", width=15)
