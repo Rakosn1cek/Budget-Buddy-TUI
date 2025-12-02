@@ -7,7 +7,6 @@ from rich.panel import Panel
 from rich.text import Text
 from rich.table import Table
 from rich.progress import Progress, BarColumn, TextColumn
-VERSION="1.7.3" #<<--- Minor display changes. Fix: add dekete option to categories. Card view added to most recent transactions.
 
 # --- Configuration and Initialization ---
 
@@ -186,6 +185,7 @@ def get_savings_goal():
 def get_last_n_transactions(n=10):
     conn = sqlite3.connect(DATABASE_EXPENSES)
     cursor = conn.cursor()
+    # Fetch all relevant columns including 'description' (index 3)
     cursor.execute("SELECT id, amount, category, description, date, type FROM transactions ORDER BY date DESC, id DESC LIMIT ?", (n,))
     transactions = cursor.fetchall()
     conn.close()
@@ -322,13 +322,22 @@ def display_dashboard(message=""):
     recent_tx_table = Table(show_header=True, header_style="bold green", show_lines=False, padding=(0, 1))
     recent_tx_table.add_column("ID", style="dim", min_width=3, width=4)
     recent_tx_table.add_column("Date (MM-DD)", width=8)
-    recent_tx_table.add_column("Category", width=18) 
-    recent_tx_table.add_column("Amount", justify="right", width=12)
+    # --- MODIFICATION START ---
+    # Changed header from "Category" to "Description" and increased max_width
+    recent_tx_table.add_column("Description", max_width=27, overflow="fold") 
+    # --- MODIFICATION END ---
+    recent_tx_table.add_column("Amount", justify="right", width=10)
 
     if not recent_transactions:
         recent_tx_table.add_row(Text("", style="dim"), Text("[yellow]No recent transactions.[/yellow]", style="yellow"), Text("", style="cyan"), Text("", justify="right"))
     else:
-        for tid, amount, category, _, date_str, t_type in recent_transactions:
+        # --- MODIFICATION START ---
+        # Unpack all fields, using 'description' (index 3) in the table row
+        for tid, amount, category, description, date_str, t_type in recent_transactions:
+            # Use description, but fallback to category if description is None or empty
+            display_name = description if description else category
+            # --- MODIFICATION END ---
+            
             amount_display = f"£{amount:,.0f}"
             style = "bold green" if t_type == 'income' else "bold red"
             if t_type == 'income': amount_display = "+" + amount_display
@@ -340,7 +349,10 @@ def display_dashboard(message=""):
             except (ValueError, TypeError):
                 display_date = str(date_str)
 
-            recent_tx_table.add_row(str(tid), display_date, category, Text(amount_display, style=style))
+            # --- MODIFICATION START ---
+            # Pass the display_name (description) to the table
+            recent_tx_table.add_row(str(tid), display_date, display_name, Text(amount_display, style=style))
+            # --- MODIFICATION END ---
 
     recent_tx_panel = Panel(recent_tx_table, title="LAST 10 TRANSACTIONS", border_style="green", width=87)
     
@@ -438,6 +450,7 @@ def add_transaction():
 def view_transactions_table(filter_query=None, title="Recent Expenses"):
     """
     Renders transactions in a single table (used for filter/delete helper views).
+    Kept for delete_transaction use.
     """
     conn = sqlite3.connect(DATABASE_EXPENSES)
     cursor = conn.cursor()
@@ -455,11 +468,12 @@ def view_transactions_table(filter_query=None, title="Recent Expenses"):
     if not rows: return Group(Text("[yellow]No transactions found.[/yellow]")), title
 
     table = Table(title=f"History: {title}", title_style="bold yellow", show_header=True, header_style="bold magenta", padding=(0,1))
-    table.add_column("ID", style="dim", width=4)
-    table.add_column("Date", style="bold white", width=10)
-    table.add_column("Category", style="cyan", width=20) 
-    table.add_column("Description", style="white", width=30)
-    table.add_column("Amount", style="bold", justify="right", width=12)
+    # Removing fixed width to allow Rich to better manage space, preventing truncation
+    table.add_column("ID", style="dim", min_width=4) 
+    table.add_column("Date", style="bold white", min_width=10)
+    table.add_column("Category", style="cyan", min_width=15) 
+    table.add_column("Description", style="white", min_width=25)
+    table.add_column("Amount", style="bold", justify="right", min_width=10)
 
     for tid, amount, cat, desc, d_db, t_type in rows:
         try: d_disp = datetime.datetime.strptime(d_db, "%Y-%m-%d").strftime("%d-%m-%y")
@@ -473,6 +487,62 @@ def view_transactions_table(filter_query=None, title="Recent Expenses"):
         table.add_row(str(tid), d_disp, cat, (desc or "—"), Text(amt_str, style=style))
         
     return table, title
+
+def display_filtered_transactions_in_cards(filter_query):
+    """
+    NEW: Fetches filtered transactions and displays them in the non-paginated card view.
+    """
+    conn = sqlite3.connect(DATABASE_EXPENSES)
+    cursor = conn.cursor()
+    # Fetch all transactions matching the category filter
+    sql = "SELECT id, amount, category, description, date, type FROM transactions WHERE category LIKE ? ORDER BY date DESC, id DESC"
+    params = ('%' + filter_query + '%',)
+    cursor.execute(sql, params)
+    transactions = cursor.fetchall()
+    conn.close()
+
+    title = f"Filtered: '{filter_query}'"
+
+    if not transactions: 
+        show_temporary_view(title, Text("[yellow]No transactions found matching this filter.[/yellow]"))
+        return
+
+    cards = []
+    for tid, amount, cat, desc, d_db, t_type in transactions:
+        try: d_disp = datetime.datetime.strptime(d_db, "%Y-%m-%d").strftime("%d %b %Y")
+        except: d_disp = d_db
+
+        style = "bold green" if t_type == 'income' else "bold red"
+        
+        amount_str = f"£{amount:,.2f}"
+        if t_type == 'income': amount_str = "+" + amount_str
+        else: amount_str = "-" + amount_str
+        
+        # Grid for clean left-justified card content
+        card_content = Table.grid(padding=(0, 1), expand=True) 
+        # Left-justify both columns for clean reading
+        card_content.add_column(style="dim", justify="left", min_width=10) 
+        card_content.add_column(style="bold white", justify="left")
+        
+        card_content.add_row("ID:", str(tid))
+        card_content.add_row("Date:", d_disp)
+        card_content.add_row("Category:", cat)
+        card_content.add_row("Description:", desc or "—")
+        card_content.add_row("Type:", t_type.capitalize())
+        
+        cards.append(
+            Panel(
+                card_content,
+                title=Text(amount_str, style=style),
+                title_align="right",
+                border_style=style,
+                width=None 
+            )
+        )
+    
+    # Display cards as a Group (stacked vertically)
+    card_group = Group(*cards)
+    show_temporary_view(title, card_group)
 
 def view_transactions_paginated():
     """
@@ -510,9 +580,9 @@ def view_transactions_paginated():
                 else: amount_str = "-" + amount_str
                 
                 # Use a grid within the panel for clean alignment
-                # Added expand=True here to force the card content to use full width
                 card_content = Table.grid(padding=(0, 1), expand=True) 
-                card_content.add_column(style="dim", justify="right", min_width=10)
+                # Left-justify both columns for consistency with filter view
+                card_content.add_column(style="dim", justify="left", min_width=10)
                 card_content.add_column(style="bold white", justify="left")
                 
                 card_content.add_row("ID:", str(tid))
@@ -591,8 +661,8 @@ def filter_by_category():
     # Note: Filter input remains text since it allows partial matches.
     cat = input("Enter Category Name (partial match allowed): ").strip()
     if cat:
-        table, title = view_transactions_table(filter_query=cat)
-        show_temporary_view(title, table)
+        # Changed to use the new card view function for responsiveness
+        display_filtered_transactions_in_cards(filter_query=cat)
         return f"[bold green]Filter applied: {cat}[/bold green]"
     return "[yellow]Cancelled.[/yellow]"
 
@@ -663,7 +733,7 @@ def weekly_summary():
 def get_recurring_templates():
     conn = sqlite3.connect(DATABASE_SETTINGS)
     cur = conn.cursor()
-    cur.execute("SELECT id, name, amount, category, description, due_day FROM recurring_templates")
+    cur.execute("SELECT id, name, amount, category, description, due_day FROM recurring_templates ORDER BY category ASC, due_day ASC")
     rows = cur.fetchall()
     conn.close()
     return rows
@@ -673,22 +743,60 @@ def manage_recurring_templates():
     CONSOLE.clear()
     CONSOLE.print(Panel("[bold orange1]Manage Recurring Templates[/bold orange1]", border_style="orange1"))
     
-    if templates:
-        # Widen columns and add ID
-        table = Table(title="Templates", show_header=True, header_style="bold orange1")
-        table.add_column("ID", width=4, style="dim")
-        table.add_column("Day", width=4, justify="center", style="yellow")
-        table.add_column("Name", width=20, style="bold white")
-        table.add_column("Amount", width=12, justify="right", style="red")
-        table.add_column("Category", width=15, style="cyan")
-        
+    if not templates:
+        CONSOLE.print("[yellow]No templates.[/yellow]")
+    else:
+        # 1. Group templates by Category
+        grouped_templates = {}
         for tid, name, amt, cat, desc, day in templates:
-            table.add_row(str(tid), str(day), name, f"£{amt:,.2f}", cat)
-        CONSOLE.print(table)
+            cat = cat.strip() # Ensure clean key
+            if cat not in grouped_templates:
+                grouped_templates[cat] = []
+            grouped_templates[cat].append({
+                'id': tid, 
+                'name': name, 
+                'amount': amt, 
+                'due_day': day,
+            })
+            
+        # 2. Create Cards for each Category
+        category_cards = []
+        sorted_categories = sorted(grouped_templates.keys())
+        
+        for category in sorted_categories:
+            template_list = grouped_templates[category]
+            
+            # Inner Table for the specific category
+            inner_table = Table(show_header=True, header_style="bold dim", show_lines=False, padding=(0, 1), box=None)
+            
+            # Defining the structure that is mobile-friendly
+            inner_table.add_column("ID", width=4, style="cyan")
+            inner_table.add_column("Day", width=4, justify="center", style="yellow")
+            inner_table.add_column("Name", min_width=15, style="bold white")
+            inner_table.add_column("Amount", justify="right", style="red")
+            
+            for t in template_list:
+                amount_str = f"£{t['amount']:,.2f}"
+                inner_table.add_row(
+                    str(t['id']),
+                    str(t['due_day']),
+                    t['name'],
+                    amount_str
+                )
+
+            category_cards.append(
+                Panel(
+                    inner_table,
+                    title=f"[bold orange1]{category} ({len(template_list)})[/bold orange1]",
+                    title_align="left", # Left justified as requested
+                    border_style="orange1",
+                    width=None 
+                )
+            )
+            
+        CONSOLE.print(Group(*category_cards))
         
         CONSOLE.print("\n[yellow]NOTE: Since Name is not unique, use the ID when deleting or applying a template.[/yellow]")
-    else:
-        CONSOLE.print("[yellow]No templates.[/yellow]")
         
     CONSOLE.print("\n[1] Add New | [2] Delete | [C] Cancel")
     ch = input("Choice: ").upper().strip()
@@ -726,7 +834,9 @@ def delete_recurring_template(templates):
     if not templates: return "[yellow]None to delete.[/yellow]"
     
     CONSOLE.print(Panel("[bold red]Delete Template[/bold red]"))
-    # Reprint table for context if needed, or user remembers ID
+    # The list of templates would ideally be shown here again for reference, 
+    # but we rely on the user having checked Option 10 first.
+    
     while True:
         tid = input("ID to delete (C to cancel): ").upper().strip()
         if tid == 'C': return "Cancelled."
@@ -747,19 +857,57 @@ def apply_recurring_template():
     if not templates: return "[red]No templates found.[/red]"
     
     CONSOLE.clear()
-    CONSOLE.print(Panel("[bold green]Apply Recurring[/bold green]"))
+    CONSOLE.print(Panel("[bold green]Apply Recurring Payment[/bold green]", border_style="green"))
     
-    # Show templates
-    table = Table(show_header=True, header_style="bold green")
-    table.add_column("ID", width=4); table.add_column("Name", width=20); table.add_column("Amount", justify="right")
+    # 1. Group templates by Category and create the t_map for selection
+    grouped_templates = {}
     t_map = {}
     for tid, name, amt, cat, desc, day in templates:
-        table.add_row(str(tid), name, f"£{amt:,.2f}")
-        t_map[tid] = (name, amt, cat, desc)
-    CONSOLE.print(table)
+        cat = cat.strip()
+        t_map[tid] = (name, amt, cat, desc) # Create map for selection later
+        if cat not in grouped_templates:
+            grouped_templates[cat] = []
+        grouped_templates[cat].append({
+            'id': tid, 
+            'name': name, 
+            'amount': amt, 
+            'due_day': day,
+        })
+        
+    # 2. Create Cards for each Category (display)
+    category_cards = []
+    sorted_categories = sorted(grouped_templates.keys())
     
+    for category in sorted_categories:
+        template_list = grouped_templates[category]
+        
+        # Inner Table for the specific category
+        inner_table = Table(show_header=True, header_style="bold dim", show_lines=False, padding=(0, 1), box=None)
+        
+        inner_table.add_column("ID", width=4, style="cyan")
+        inner_table.add_column("Day", width=4, justify="center", style="yellow")
+        inner_table.add_column("Name", min_width=15, style="bold white")
+        inner_table.add_column("Amount", justify="right", style="red")
+        
+        for t in template_list:
+            amount_str = f"£{t['amount']:,.2f}"
+            inner_table.add_row(str(t['id']), str(t['due_day']), t['name'], amount_str)
+
+        category_cards.append(
+            Panel(
+                inner_table,
+                title=f"[bold green]{category} ({len(template_list)})[/bold green]",
+                title_align="left",
+                border_style="green",
+                width=None
+            )
+        )
+        
+    CONSOLE.print(Group(*category_cards))
+    
+    # 3. Handle selection
     while True:
-        tid = input("ID to apply (C to cancel): ").upper().strip()
+        tid = input("\nEnter ID to apply (C to cancel): ").upper().strip()
         if tid == 'C': return "Cancelled."
         try: 
             tid_int = int(tid)
@@ -968,6 +1116,7 @@ def delete_category():
     
     # Display deletable categories (not protected)
     deletable_cats_with_ids = [(i, name) for i, name in categories_with_ids if name not in PROTECTED_CATEGORIES]
+    id_map = {str(i): name for i, name in categories_with_ids} # Map ID to Name globally
     
     if not deletable_cats_with_ids:
         return "[yellow]No custom categories available for deletion.[/yellow]"
@@ -976,10 +1125,8 @@ def delete_category():
     cat_list_table.add_column("ID", style="yellow", width=4)
     cat_list_table.add_column("Name", style="cyan")
     
-    id_map = {}
     for cat_id, name in deletable_cats_with_ids:
         cat_list_table.add_row(str(cat_id), name)
-        id_map[str(cat_id)] = name
         
     CONSOLE.print(cat_list_table)
     
@@ -992,6 +1139,9 @@ def delete_category():
         cat_to_delete = id_map.get(id_to_delete)
         
         if cat_to_delete:
+            if cat_to_delete in PROTECTED_CATEGORIES:
+                CONSOLE.print(f"[bold red]Category '{cat_to_delete}' is protected and cannot be deleted.[/bold red]")
+                continue
             break
         
         CONSOLE.print("[bold red]Invalid ID.[/bold red]")
@@ -1058,7 +1208,7 @@ def main():
         
         if choice == '1': msg = add_transaction()
         elif choice == '2': msg = view_transactions_paginated() # Calls the new card view
-        elif choice == '3': msg = filter_by_category()
+        elif choice == '3': msg = filter_by_category() # Calls the new card view for filter
         elif choice == '4': weekly_summary()
         elif choice == '5': monthly_summary()
         elif choice == '6': upcoming_calendar()
