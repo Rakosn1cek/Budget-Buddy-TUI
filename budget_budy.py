@@ -1,48 +1,56 @@
 import sqlite3
 import datetime
 import math
-import os # Added os import for path manipulation
+import os 
 from rich.console import Console, Group
 from rich.panel import Panel
 from rich.text import Text
 from rich.table import Table
 from rich.progress import Progress, BarColumn, TextColumn
-VERSION="1.7.1" # <<--- Date string changed to %y-%m-%d due to problems with how dasboard was pulling expenses data. Fixed recurring transactions table width for id.
+VERSION="1.7.3" #<<--- Minor display changes. Fix: add dekete option to categories. Card view added to most recent transactions.
 
 # --- Configuration and Initialization ---
 
 # Define the absolute, FIXED location where the data files live
-# This ensures the script finds the data regardless of the Current Working Directory (CWD).
 DATA_DIR = os.path.expanduser('~/Budget-Buddy-TUI')
 
-# Now, define the databases using the fixed path
+# Define the databases using the fixed path
 DATABASE_EXPENSES = os.path.join(DATA_DIR, 'expenses.db')
 DATABASE_SETTINGS = os.path.join(DATA_DIR, 'settings.db')
 
 CONSOLE = Console()
 
+# List of categories that cannot be deleted to ensure system integrity.
+PROTECTED_CATEGORIES = [
+    "Uncategorized", 
+    "Salary", 
+    "Bills", 
+    "Savings Transfer", 
+    "Rent", 
+    "Food", 
+    "Subscriptions", 
+    "Online Shopping", 
+    "Household"
+]
+
 # --- Utility Functions for TUI Control ---
 
 def show_temporary_view(title, content):
     """
-    Clears the screen, displays a specific piece of content (report/view), 
-    waits for user input, and returns. This prevents dashboard stacking.
+    Clears the screen, displays a specific piece of content, waits for input.
     """
-    # Use os.system('clear') for a more aggressive, reliable clear in TUI/Termux environments
     os.system('cls' if os.name == 'nt' else 'clear')
     CONSOLE.print(Panel(f"[bold magenta]{title}[/bold magenta]", border_style="magenta"))
     CONSOLE.print(content)
     input("\nPress Enter to return to the menu...")
-    # NOTE: The next screen clear happens back in the main loop.
 
 def initialize_db():
-    """Initializes the expenses, categories, recurring templates, and settings databases."""
+    """Initializes the database tables."""
     
-    # CRITICAL: Ensure the data directory exists before trying to create files in it
     if not os.path.exists(DATA_DIR):
         os.makedirs(DATA_DIR)
         
-    # 1. EXPENSE Database Setup (for all transactions)
+    # 1. EXPENSE Database Setup
     conn_exp = sqlite3.connect(DATABASE_EXPENSES)
     cursor_exp = conn_exp.cursor()
     cursor_exp.execute("""
@@ -52,13 +60,13 @@ def initialize_db():
             category TEXT NOT NULL,
             description TEXT,
             date TEXT NOT NULL,
-            type TEXT NOT NULL  -- 'income' or 'expense'
+            type TEXT NOT NULL
         )
     """)
     conn_exp.commit()
     conn_exp.close()
 
-    # 2. SETTINGS Database Setup (for saving goal and recurring templates)
+    # 2. SETTINGS Database Setup
     conn_set = sqlite3.connect(DATABASE_SETTINGS)
     cursor_set = conn_set.cursor()
 
@@ -70,15 +78,15 @@ def initialize_db():
         )
     """)
 
-    # Table for Recurring Templates (Updated with 'due_day')
+    # Table for Recurring Templates
     cursor_set.execute("""
         CREATE TABLE IF NOT EXISTS recurring_templates (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
-            name TEXT NOT NULL UNIQUE,
+            name TEXT NOT NULL, 
             amount REAL NOT NULL,
             category TEXT NOT NULL,
             description TEXT,
-            due_day INTEGER -- New column for the day of the month (1-31)
+            due_day INTEGER
         )
     """)
     
@@ -89,97 +97,125 @@ def initialize_db():
         )
     """)
     
-    # Ensure a few default categories exist if the table is empty
-    default_categories = ["Uncategorized", "Food", "Rent", "Salary", "Bills", "Savings Transfer"]
-    for cat in default_categories:
+    # Default categories
+    for cat in PROTECTED_CATEGORIES:
         try:
             cursor_set.execute("INSERT OR IGNORE INTO categories (name) VALUES (?)", (cat,))
         except sqlite3.IntegrityError:
-            pass # Already exists
+            pass 
 
     conn_set.commit()
     conn_set.close()
 
+def migrate_recurring_templates_schema():
+    """Migrates recurring_templates to allow duplicate names."""
+    conn = sqlite3.connect(DATABASE_SETTINGS)
+    cursor = conn.cursor()
+    try:
+        cursor.execute("ALTER TABLE recurring_templates RENAME TO recurring_templates_old")
+        cursor.execute("""
+            CREATE TABLE recurring_templates (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                name TEXT NOT NULL,
+                amount REAL NOT NULL,
+                category TEXT NOT NULL,
+                description TEXT,
+                due_day INTEGER
+            )
+        """)
+        cursor.execute("""
+            INSERT INTO recurring_templates (id, name, amount, category, description, due_day)
+            SELECT id, name, amount, category, description, due_day FROM recurring_templates_old
+        """)
+        cursor.execute("DROP TABLE recurring_templates_old")
+        conn.commit()
+    except:
+        pass
+    finally:
+        conn.close()
+
 def db_check_and_migrate():
-    """Checks the database integrity for new columns and features."""
+    """Checks integrity and runs migrations."""
+    migrate_recurring_templates_schema()
+
     conn_exp = sqlite3.connect(DATABASE_EXPENSES)
     cursor_exp = conn_exp.cursor()
-    
-    # Migration 1: Check for 'type' column in transactions
     try:
         cursor_exp.execute("SELECT type FROM transactions LIMIT 1")
     except sqlite3.OperationalError:
         CONSOLE.print("[yellow]Database migration needed: Adding 'type' column.[/yellow]")
         cursor_exp.execute("ALTER TABLE transactions ADD COLUMN type TEXT DEFAULT 'expense'")
         cursor_exp.execute("UPDATE transactions SET type = 'expense' WHERE type IS NULL")
-        CONSOLE.print("[green]Migration complete: 'type' column added and defaulted.[/green]")
+        CONSOLE.print("[green]Migration complete: 'type' column added.[/green]")
         conn_exp.commit()
-
     conn_exp.close()
-
-    # Migration 2: Check for 'due_day' column in recurring_templates
+    
     conn_set = sqlite3.connect(DATABASE_SETTINGS)
     cursor_set = conn_set.cursor()
-    
     try:
-        # We need a different check because we use the 'OR REPLACE' template above
         cursor_set.execute("SELECT due_day FROM recurring_templates LIMIT 1")
     except sqlite3.OperationalError:
-        CONSOLE.print("[yellow]Settings migration needed: Adding 'due_day' column to recurring templates.[/yellow]")
+        CONSOLE.print("[yellow]Settings migration: Adding 'due_day' column.[/yellow]")
         cursor_set.execute("ALTER TABLE recurring_templates ADD COLUMN due_day INTEGER DEFAULT 1")
-        CONSOLE.print("[green]Migration complete: 'due_day' column added and defaulted to day 1.[/green]")
+        CONSOLE.print("[green]Migration complete: 'due_day' added.[/green]")
         conn_set.commit()
-        
     conn_set.close()
 
 # --- Core Data Fetching Functions ---
 
 def get_financial_summary():
-    """Calculates total income, expenses, and net balance."""
     conn = sqlite3.connect(DATABASE_EXPENSES)
     cursor = conn.cursor()
-    
-    # Calculate Total Income (type='income')
     cursor.execute("SELECT SUM(amount) FROM transactions WHERE type='income'")
     total_income = cursor.fetchone()[0] or 0.0
-
-    # Calculate Total Expenses (type='expense')
     cursor.execute("SELECT SUM(amount) FROM transactions WHERE type='expense'")
     total_expenses_raw = cursor.fetchone()[0] or 0.0
-    
-    # Display expenses as negative for clarity
     total_expenses = total_expenses_raw * -1 
-    
     net_balance = total_income + total_expenses
-    
     conn.close()
     return total_income, total_expenses, net_balance
 
 def get_savings_goal():
-    """Retrieves the current savings goal and saved amount."""
     conn = sqlite3.connect(DATABASE_SETTINGS)
     cursor = conn.cursor()
-    
     goal_target = cursor.execute("SELECT value FROM settings WHERE key='goal_target'").fetchone()
     current_saved = cursor.execute("SELECT value FROM settings WHERE key='current_saved'").fetchone()
-    
     conn.close()
-    
-    return (float(goal_target[0]) if goal_target else 0.0,
-            float(current_saved[0]) if current_saved else 0.0)
+    return (float(goal_target[0]) if goal_target else 0.0, float(current_saved[0]) if current_saved else 0.0)
 
 def get_last_n_transactions(n=10):
-    """Fetches the last N transactions for dashboard display."""
     conn = sqlite3.connect(DATABASE_EXPENSES)
     cursor = conn.cursor()
-    # Fetch N most recent transactions (ordered by date/id descending)
     cursor.execute("SELECT id, amount, category, description, date, type FROM transactions ORDER BY date DESC, id DESC LIMIT ?", (n,))
     transactions = cursor.fetchall()
     conn.close()
     return transactions
 
-def get_categories():
-    """Fetches all user-defined categories."""
+def get_paginated_transactions(page=1, page_size=10):
+    """Fetches transactions for a specific page."""
+    conn = sqlite3.connect(DATABASE_EXPENSES)
+    cursor = conn.cursor()
+
+    # Get total count
+    cursor.execute("SELECT COUNT(*) FROM transactions")
+    total_count = cursor.fetchone()[0]
+
+    # Calculate offset and limit
+    offset = (page - 1) * page_size
+    
+    # Fetch paginated transactions
+    sql = "SELECT id, amount, category, description, date, type FROM transactions ORDER BY date DESC, id DESC LIMIT ? OFFSET ?"
+    cursor.execute(sql, (page_size, offset))
+    transactions = cursor.fetchall()
+    conn.close()
+    
+    total_pages = math.ceil(total_count / page_size) if page_size > 0 else 1
+    
+    return transactions, total_count, total_pages
+
+
+def fetch_category_names():
+    """Fetches list of all category names from the database, sorted alphabetically."""
     conn = sqlite3.connect(DATABASE_SETTINGS)
     cursor = conn.cursor()
     cursor.execute("SELECT name FROM categories ORDER BY name ASC")
@@ -187,28 +223,43 @@ def get_categories():
     conn.close()
     return categories
 
+def get_categories_with_ids():
+    """Fetches category names and assigns a sequential display ID."""
+    category_names = fetch_category_names()
+    categories_with_ids = []
+    for i, name in enumerate(category_names, 1):
+        categories_with_ids.append((i, name)) # (id, name)
+    return categories_with_ids
+
+def get_category_name_by_id(cat_id):
+    """Utility to map display ID back to category name."""
+    categories = get_categories_with_ids()
+    try:
+        cat_id = int(cat_id)
+        for i, name in categories:
+            if i == cat_id:
+                return name
+        return None
+    except ValueError:
+        return None
+
+# --- Display Functions ---
+
 def display_dashboard(message=""):
-    """Renders the complete Budget Buddy TUI dashboard."""
+    # Clear screen before render
+    os.system('cls' if os.name == 'nt' else 'clear')
     
-    # 1. Clear the screen immediately before drawing the dashboard
-    CONSOLE.clear()
-    
-    # 2. Get current time and format
     now = datetime.datetime.now()
     header_date = now.strftime("%A, %d %b %Y | %H:%M")
     
-    # 3. Create Header Panel
     header_content = Text(f"BUDGET BUDDY TUI | {header_date}", style="bold white on purple")
-    # Using Panel to draw a border around the header content
     CONSOLE.print(Panel(header_content, title_align="left", border_style="purple"))
 
-    # 4. Get Financial Data
     total_income, total_expenses, net_balance = get_financial_summary()
     recent_transactions = get_last_n_transactions(10)
     
-    # 5. Financial Overview Panel Content
+    # Financial Overview
     balance_style = "bold green" if net_balance >= 0 else "bold red"
-    
     overview_text = Text()
     overview_text.append("Total Income:  ", style="green")
     overview_text.append(f"+£{total_income:,.2f}\n", style="bold green")
@@ -219,18 +270,14 @@ def display_dashboard(message=""):
     
     overview_panel = Panel(overview_text, title="FINANCIAL OVERVIEW (All Time)", border_style="cyan", width=87)
 
-    # 6. Savings Goal Panel Content
+    # Savings Goal
     goal_target, current_saved = get_savings_goal()
-    
     savings_panel_content = None 
-    
     if goal_target > 0:
         progress_val = (current_saved / goal_target) * 100 if goal_target > 0 else 0
-        progress_val = min(progress_val, 100) # Cap at 100%
-        
+        progress_val = min(progress_val, 100)
         goal_target_str = f"£{goal_target:,.2f}"
         current_saved_str = f"£{current_saved:,.2f}"
-        
         progress_bar = Progress(
             TextColumn(f"Saved: {current_saved_str} / {goal_target_str}"),
             BarColumn(bar_width=20, style="yellow", complete_style="bold green"),
@@ -238,29 +285,22 @@ def display_dashboard(message=""):
             console=CONSOLE,
             transient=True
         )
-        
         task_id = progress_bar.add_task("[bold cyan]Saving...", total=goal_target)
         progress_bar.update(task_id, completed=current_saved)
-
         progress_table = progress_bar.make_tasks_table(progress_bar.tasks)
         final_line = Text(f"\nGoal Progress: {progress_val:.0f}%", style="bold green")
-        
         savings_panel_content = Group(progress_table, final_line)
-        
     else:
         savings_panel_content = Text("[yellow]No savings goal set. Use option 8 to set one![/yellow]")
-
     savings_panel = Panel(savings_panel_content, title="SAVINGS GOAL", border_style="yellow", width=87)
 
-    # 7. Menu Panel Content
+    # Menu
     menu_table = Table.grid(padding=(0, 1))
     menu_table.add_column()
     menu_table.add_column()
-
-    # Menu options (Text only, no icons)
     menu_options = [
         ("1. Add Transaction", "bold green"),
-        ("2. View Recent Expenses", "bold cyan"),
+        ("2. View Transaction History (Card View)", "bold cyan"), # Updated Menu Text
         ("3. Filter by Category", "bold magenta"),
         ("4. Weekly Summary", "yellow"),
         ("5. Monthly Detailed Summary", "yellow"),
@@ -273,1054 +313,763 @@ def display_dashboard(message=""):
         ("12. Exit Application", "bold white"),
         ("13. Manage Categories", "bold yellow")
     ]
-
     for i, (text, style) in enumerate(menu_options):
-        # Find the first space to split the number/prefix from the description
         parts = text.split(". ", 1)
-        number_prefix = parts[0] + "." # Re-add the dot
-        description = parts[1]
-        menu_table.add_row(f"[bold white]{number_prefix}[/bold white]", Text(description, style=style))
-
+        menu_table.add_row(f"[bold white]{parts[0]}.[/bold white]", Text(parts[1], style=style))
     menu_panel = Panel(menu_table, title="MENU", border_style="magenta", width=87)
     
-    # 8. Recent Transactions Panel Content
+    # Recent Transactions
     recent_tx_table = Table(show_header=True, header_style="bold green", show_lines=False, padding=(0, 1))
-    recent_tx_table.add_column("ID", style="dim", min_width=3, width=5)
+    recent_tx_table.add_column("ID", style="dim", min_width=3, width=4)
     recent_tx_table.add_column("Date (MM-DD)", width=8)
-    recent_tx_table.add_column("Category", width=10)
+    recent_tx_table.add_column("Category", width=18) 
     recent_tx_table.add_column("Amount", justify="right", width=12)
 
     if not recent_transactions:
-        # Use a single row to display the message across all columns
-        recent_tx_table.add_row(
-            Text("", style="dim"),
-            Text("[yellow]No recent transactions recorded.[/yellow]", style="yellow"),
-            Text("", style="cyan"),
-            Text("", justify="right")
-        )
+        recent_tx_table.add_row(Text("", style="dim"), Text("[yellow]No recent transactions.[/yellow]", style="yellow"), Text("", style="cyan"), Text("", justify="right"))
     else:
-        for tid, amount, category, _, date, t_type in recent_transactions:
+        for tid, amount, category, _, date_str, t_type in recent_transactions:
             amount_display = f"£{amount:,.0f}"
-            if t_type == 'income':
-                amount_style = "bold green"
-                amount_display = f"+{amount_display}"
-            else:
-                amount_style = "bold red"
-                amount_display = f"-{amount_display}"
-                
-            recent_tx_table.add_row(
-                str(tid),
-                date[5:], # Show MM-DD only for brevity
-                category[:10],
-                Text(amount_display, style=amount_style)
-            )
+            style = "bold green" if t_type == 'income' else "bold red"
+            if t_type == 'income': amount_display = "+" + amount_display
+            else: amount_display = "-" + amount_display
+            
+            try:
+                date_obj = datetime.datetime.strptime(date_str, "%Y-%m-%d")
+                display_date = date_obj.strftime("%m-%d")
+            except (ValueError, TypeError):
+                display_date = str(date_str)
+
+            recent_tx_table.add_row(str(tid), display_date, category, Text(amount_display, style=style))
 
     recent_tx_panel = Panel(recent_tx_table, title="LAST 10 TRANSACTIONS", border_style="green", width=87)
     
-    # 9. Assemble Layout - Stacking all panels vertically
     CONSOLE.print(overview_panel)
     CONSOLE.print(savings_panel)
     CONSOLE.print(menu_panel)
     CONSOLE.print(recent_tx_panel) 
 
-    # 10. Print Message and Prompt
     if message:
-        # Using Text.from_markup() to correctly parse the color tags in the message string
         message_content = Text.from_markup(message)
         CONSOLE.print(Panel(message_content, title="NOTIFICATION", border_style="yellow", width=87))
 
     return input("\nSelect an option (1-13): ")
 
-# --- Transaction Management Functions ---
+# --- Input Functions ---
 
 def validate_date(date_str):
-    """
-    Validates if a string is a date in DD-MM-YYYY format (UK standard).
-    Returns the date object if valid, or None if invalid.
-    """
-    if not date_str:
-        # If input is empty, default to today's date
-        return datetime.datetime.now().date() 
+    if not date_str: return datetime.datetime.now().date()
     try:
-        # Attempt to parse as YYYY-MM-DD
-        dt_obj = datetime.datetime.strptime(date_str, "%Y-%m-%d")
-        return dt_obj.date()
+        return datetime.datetime.strptime(date_str, "%d-%m-%Y").date()
     except ValueError:
         return None
 
+# --- Transaction Logic ---
+
 def add_transaction():
-    """Allows user to add a new income or expense transaction with date selection."""
-    # We rely on main loop clear before display_dashboard is called
+    CONSOLE.clear()
     CONSOLE.print(Panel("[bold magenta]Add New Transaction[/bold magenta]", border_style="magenta"))
     
-    # 1. Get Type
     while True:
         t_type = input("Type [I]ncome or [E]xpense: ").lower()
-        if t_type in ('i', 'income'):
-            transaction_type = 'income'
-            break
-        elif t_type in ('e', 'expense'):
-            transaction_type = 'expense'
-            break
+        if t_type in ('i', 'income'): transaction_type = 'income'; break
+        elif t_type in ('e', 'expense'): transaction_type = 'expense'; break
         CONSOLE.print("[bold red]Invalid type. Enter 'I' or 'E'.[/bold red]")
 
-    # 2. Get Amount
     while True:
         try:
-            amount_input = float(input(f"Enter amount (£): "))
-            if amount_input <= 0:
-                CONSOLE.print("[bold red]Amount must be positive.[/bold red]")
+            amount = float(input(f"Enter amount (£): "))
+            if amount <= 0: 
+                CONSOLE.print("[bold red]Positive amount required.[/bold red]")
                 continue
-            
-            amount = amount_input
             break
-        except ValueError:
-            CONSOLE.print("[bold red]Invalid number format. Please enter a numerical value.[/bold red]")
+        except ValueError: CONSOLE.print("[bold red]Invalid number.[/bold red]")
 
-    # 3. Get Category
-    available_categories = get_categories()
-    categories_list = ", ".join(available_categories)
-    CONSOLE.print(f"\n[cyan]Available Categories:[/cyan] {categories_list}")
-
-    while True:
-        category = input("Enter Category (or select from list above): ").strip()
-        if not category:
-            category = "Uncategorized"
+    # Category Selection by ID
+    categories_with_ids = get_categories_with_ids()
+    
+    cat_table = Table(title="Available Categories", show_header=True, header_style="bold cyan")
+    cat_table.add_column("ID", style="yellow", width=4)
+    cat_table.add_column("Name", style="cyan")
+    
+    for cat_id, name in categories_with_ids:
+        cat_table.add_row(str(cat_id), name)
         
-        # Simple validation: if user enters a new category, add it automatically
-        if category not in available_categories:
-            if input(f"Category '{category}' not found. Add it? (y/n): ").lower() == 'y':
-                add_category_to_db(category)
+    CONSOLE.print(cat_table)
+    
+    while True:
+        cat_input = input("Enter Category ID (or C to cancel): ").strip()
+        if cat_input.upper() == 'C': return "[yellow]Transaction entry cancelled.[/yellow]"
+        
+        category = get_category_name_by_id(cat_input)
+        
+        if category:
+            break
+        else:
+            # Check if user wants to add a new category by name if input isn't a valid ID
+            if input(f"ID '{cat_input}' not found. Add a NEW category with name '{cat_input}'? (y/n): ").lower() == 'y':
+                add_category_to_db(cat_input)
+                category = cat_input
                 break
             else:
-                CONSOLE.print("[bold red]Please select an existing category or add a new one.[/bold red]")
+                CONSOLE.print("[bold red]Invalid ID or not adding a new category. Please try again or C to cancel.[/bold red]")
                 continue
-        break
 
-
-    # 4. Get Description
-    description = input("Enter short description (optional): ").strip()
-
-    # 5. Get Date (Updated Feature for YYYY-MM-DD)
-    default_date = datetime.datetime.now().strftime("%Y-%m-%d")
+    description = input("Enter description: ").strip()
+    default_date = datetime.datetime.now().strftime("%d-%m-%Y")
+    
     while True:
         date_input = input(f"Enter Date (DD-MM-YYYY, default: {default_date}): ").strip()
-        
-        # Pass the input to the validator
-        dt_obj_or_none = validate_date(date_input) 
-
-        if dt_obj_or_none is not None:
-            # Convert the valid date object back to the DB standard format (YYYY-MM-DD)
-            date_str = dt_obj_or_none.strftime("%Y-%m-%d") 
+        dt_obj = validate_date(date_input)
+        if dt_obj: 
+            date_str = dt_obj.strftime("%Y-%m-%d")
+            display_date = dt_obj.strftime("%d-%m-%Y")
             break
-        
-        CONSOLE.print("[bold red]Invalid date format. Please use DD-MM-YYYY.[/bold red]")
+        CONSOLE.print("[bold red]Invalid format (DD-MM-YYYY).[/bold red]")
 
-
-    # 6. Save to DB
     conn = sqlite3.connect(DATABASE_EXPENSES)
     cursor = conn.cursor()
     cursor.execute("INSERT INTO transactions (amount, category, description, date, type) VALUES (?, ?, ?, ?, ?)",
                    (amount, category, description, date_str, transaction_type))
     conn.commit()
     conn.close()
+    return f"[bold green]Recorded {transaction_type.upper()}: £{amount:,.2f} ({category}) on {display_date}.[/bold green]"
 
-    # Display confirmation message with the user's preferred date format for feedback
-    display_date = dt_obj_or_none.strftime("%Y-%m-%d")
-    return f"[bold green]Successfully recorded {transaction_type.upper()} of £{amount:,.2f} under {category} on {display_date}.[/bold green]"
-
-def view_transactions(filter_query=None, title="Recent Expenses"):
-    """Fetches and formats a list of transactions for display in a temporary view."""
+def view_transactions_table(filter_query=None, title="Recent Expenses"):
+    """
+    Renders transactions in a single table (used for filter/delete helper views).
+    """
     conn = sqlite3.connect(DATABASE_EXPENSES)
     cursor = conn.cursor()
-    
-    sql_query = "SELECT id, amount, category, description, date, type FROM transactions ORDER BY date DESC, id DESC LIMIT 50"
+    sql = "SELECT id, amount, category, description, date, type FROM transactions ORDER BY date DESC, id DESC LIMIT 50"
     params = ()
-    
     if filter_query:
-        sql_query = f"SELECT id, amount, category, description, date, type FROM transactions WHERE category LIKE ? ORDER BY date DESC, id DESC"
+        sql = "SELECT id, amount, category, description, date, type FROM transactions WHERE category LIKE ? ORDER BY date DESC, id DESC"
         params = ('%' + filter_query + '%',)
-        title = f"Filtered Transactions: '{filter_query}'"
-
-    cursor.execute(sql_query, params)
-    transactions = cursor.fetchall()
+        title = f"Filtered: '{filter_query}'"
+    
+    cursor.execute(sql, params)
+    rows = cursor.fetchall()
     conn.close()
 
-    if not transactions:
-        return Group(Text("[yellow]No transactions found matching the criteria.[/yellow]")), title
+    if not rows: return Group(Text("[yellow]No transactions found.[/yellow]")), title
 
-    table = Table(title="Transaction History (Latest 50)", title_style="bold yellow", show_header=True, header_style="bold magenta", padding=(0,1))
-    
-    # Column definitions with tight widths for mobile
-    table.add_column("ID", style="dim", min_width=3, width=5) 
-    table.add_column("Date (MM-DD)", style="bold white", width=8) 
-    table.add_column("Category", style="cyan", width=10)
-    table.add_column("Description", style="white", width=12) 
+    table = Table(title=f"History: {title}", title_style="bold yellow", show_header=True, header_style="bold magenta", padding=(0,1))
+    table.add_column("ID", style="dim", width=4)
+    table.add_column("Date", style="bold white", width=10)
+    table.add_column("Category", style="cyan", width=20) 
+    table.add_column("Description", style="white", width=30)
     table.add_column("Amount", style="bold", justify="right", width=12)
-    
-    for tid, amount, category, description, date_db, t_type in transactions:
-        amount_display = f"£{amount:,.2f}"
+
+    for tid, amount, cat, desc, d_db, t_type in rows:
+        try: d_disp = datetime.datetime.strptime(d_db, "%Y-%m-%d").strftime("%d-%m-%y")
+        except: d_disp = d_db
         
-        # Convert DB date (YYYY-MM-DD) to Display date (MM-DD)
-        try:
-            display_date = datetime.datetime.strptime(date_db, "%Y-%m-%d").strftime("%m-%d") 
-        except ValueError:
-            display_date = date_db # Fallback if DB format is corrupted
-            
-        if t_type == 'income':
-            amount_style = "bold green"
-            amount_display = f"+{amount_display}"
-        else: # expense
-            amount_style = "bold red"
-            amount_display = f"-{amount_display}"
-            
-        table.add_row(
-            str(tid),
-            display_date,
-            category[:10], # Truncate category if needed
-            description[:12] if description else "---", # Truncate description if needed
-            Text(amount_display, style=amount_style)
-        )
+        amt_str = f"£{amount:,.2f}"
+        style = "bold green" if t_type == 'income' else "bold red"
+        if t_type == 'income': amt_str = "+" + amt_str
+        else: amt_str = "-" + amt_str
+        
+        table.add_row(str(tid), d_disp, cat, (desc or "—"), Text(amt_str, style=style))
         
     return table, title
 
-def delete_transaction():
-    """Prompts for transaction ID and deletes it."""
-    # 1. Get the list of transactions
-    table, title = view_transactions(title="Transactions to Delete (Latest 50)")
-
-    # 2. Clear the screen and display the transaction list 
-    os.system('cls' if os.name == 'nt' else 'clear')
-    CONSOLE.print(Panel(f"[bold red]{title}[/bold red]", border_style="red"))
-    CONSOLE.print(table) 
-
-    # 3. Get the ID to delete 
+def view_transactions_paginated():
+    """
+    Renders transactions in a paginated card view (Option 2).
+    """
+    page = 1
+    page_size = 10
+    
     while True:
-        try:
-            tid = input("\nEnter ID of transaction to delete (or 'C' to cancel): ").upper().strip()
-            if tid == 'C':
-                return "Deletion cancelled."
+        os.system('cls' if os.name == 'nt' else 'clear')
+        
+        transactions, total_count, total_pages = get_paginated_transactions(page, page_size)
+
+        current_range_start = (page - 1) * page_size + 1
+        current_range_end = min(page * page_size, total_count)
+
+        CONSOLE.print(Panel(
+            f"[bold magenta]Transaction History (Card View)[/bold magenta]", 
+            subtitle=f"Page {page} of {total_pages} | Showing {current_range_start}-{current_range_end} of {total_count} total.",
+            border_style="magenta"
+        ))
+
+        if not transactions:
+            CONSOLE.print(Panel("[yellow]No transactions found in this range.[/yellow]"))
+        else:
+            cards = []
+            for tid, amount, cat, desc, d_db, t_type in transactions:
+                try: d_disp = datetime.datetime.strptime(d_db, "%Y-%m-%d").strftime("%d %b %Y")
+                except: d_disp = d_db
+
+                style = "bold green" if t_type == 'income' else "bold red"
                 
+                amount_str = f"£{amount:,.2f}"
+                if t_type == 'income': amount_str = "+" + amount_str
+                else: amount_str = "-" + amount_str
+                
+                # Use a grid within the panel for clean alignment
+                # Added expand=True here to force the card content to use full width
+                card_content = Table.grid(padding=(0, 1), expand=True) 
+                card_content.add_column(style="dim", justify="right", min_width=10)
+                card_content.add_column(style="bold white", justify="left")
+                
+                card_content.add_row("ID:", str(tid))
+                card_content.add_row("Date:", d_disp)
+                card_content.add_row("Category:", cat)
+                card_content.add_row("Description:", desc or "—")
+                card_content.add_row("Type:", t_type.capitalize())
+                
+                cards.append(
+                    Panel(
+                        card_content,
+                        title=Text(amount_str, style=style),
+                        title_align="right",
+                        border_style=style,
+                        width=None # Let rich console manage width
+                    )
+                )
+            
+            # Display cards as a Group (stacked vertically)
+            card_group = Group(*cards)
+            CONSOLE.print(card_group)
+        
+        # Navigation
+        nav_options = []
+        if page > 1:
+            nav_options.append("[P]revious Page")
+        if page < total_pages:
+            nav_options.append("[N]ext Page")
+        nav_options.append("[C]ancel / Exit")
+        
+        CONSOLE.print("\n" + " | ".join(nav_options), style="bold yellow")
+        
+        choice = input("Enter choice (P/N/C): ").upper().strip()
+
+        if choice == 'C':
+            return "[bold green]Transaction history view closed.[/bold green]"
+        elif choice == 'P' and page > 1:
+            page -= 1
+        elif choice == 'N' and page < total_pages:
+            page += 1
+        else:
+            if choice not in ('P', 'N'):
+                 CONSOLE.print("[red]Invalid choice. Must be P, N, or C.[/red]")
+                 input("Press Enter to continue...")
+            elif choice == 'P' or choice == 'N': # Prevent accidental exit if P or N pressed on boundary
+                 input("No more pages in that direction. Press Enter to continue...")
+
+
+def delete_transaction():
+    table, title = view_transactions_table(title="Delete Transaction")
+    show_temporary_view(title, table)
+    CONSOLE.clear()
+    CONSOLE.print(Panel("[bold red]Delete Transaction[/bold red]", border_style="red"))
+    CONSOLE.print(table)
+    
+    while True:
+        tid = input("\nEnter ID to delete (C to cancel): ").upper().strip()
+        if tid == 'C': return "Deletion cancelled."
+        try: 
             tid_int = int(tid)
             break
-        except ValueError:
-            CONSOLE.print("[bold red]Invalid ID. Please enter a number or 'C'.[/bold red]")
+        except ValueError: CONSOLE.print("[bold red]Invalid ID.[/bold red]")
             
     conn = sqlite3.connect(DATABASE_EXPENSES)
-    cursor = conn.cursor()
-    cursor.execute("DELETE FROM transactions WHERE id = ?", (tid_int,))
-    
-    if cursor.rowcount > 0:
-        conn.commit()
-        conn.close()
-        return f"[bold green]Transaction ID {tid_int} deleted successfully.[/bold green]"
-    else:
-        conn.close()
-        return f"[bold red]Error: No transaction found with ID {tid_int}.[/bold red]"
+    cur = conn.cursor()
+    cur.execute("DELETE FROM transactions WHERE id = ?", (tid_int,))
+    if cur.rowcount > 0:
+        conn.commit(); conn.close()
+        return f"[bold green]Deleted ID {tid_int}.[/bold green]"
+    conn.close()
+    return f"[bold red]ID {tid_int} not found.[/bold red]"
 
 def filter_by_category():
-    """Prompts the user for a category filter and displays results."""
     os.system('cls' if os.name == 'nt' else 'clear')
-    CONSOLE.print(Panel("[bold magenta]Filter Transactions by Category[/bold magenta]", border_style="magenta"))
-    category = input("Enter the category to filter by (e.g., Food, Bills): ").strip()
-    
-    if category:
-        table, title = view_transactions(filter_query=category)
+    CONSOLE.print(Panel("[bold magenta]Filter[/bold magenta]", border_style="magenta"))
+    # Note: Filter input remains text since it allows partial matches.
+    cat = input("Enter Category Name (partial match allowed): ").strip()
+    if cat:
+        table, title = view_transactions_table(filter_query=cat)
         show_temporary_view(title, table)
-        return f"[bold green]Filter applied for category: {category}[/bold green]"
-    else:
-        return "[yellow]Filter cancelled. Returning to menu.[/yellow]"
+        return f"[bold green]Filter applied: {cat}[/bold green]"
+    return "[yellow]Cancelled.[/yellow]"
 
-# --- Summary & Reporting Functions ---
-
-def get_transaction_data(start_date=None, end_date=None):
-    """Fetches transactions within a date range and groups them by category and type."""
+def get_transaction_data(start, end):
     conn = sqlite3.connect(DATABASE_EXPENSES)
-    cursor = conn.cursor()
-    
-    sql_query = "SELECT amount, category, type FROM transactions"
-    params = []
-    
-    if start_date and end_date:
-        sql_query += " WHERE date BETWEEN ? AND ?"
-        params = [start_date, end_date]
-
-    cursor.execute(sql_query, params)
-    transactions = cursor.fetchall()
+    cur = conn.cursor()
+    cur.execute("SELECT amount, category, type FROM transactions WHERE date BETWEEN ? AND ?", (start, end))
+    rows = cur.fetchall()
     conn.close()
-    
-    category_summary = {} # {category: {'expense': amount, 'income': amount}}
-    
-    for amount, category, t_type in transactions:
-        category = category.strip()
-        if category not in category_summary:
-            category_summary[category] = {'expense': 0.0, 'income': 0.0}
-            
-        if t_type == 'income':
-            category_summary[category]['income'] += amount
-        else: # expense
-            category_summary[category]['expense'] += amount
-            
-    return category_summary
+    summary = {}
+    for amt, cat, typ in rows:
+        cat = cat.strip()
+        if cat not in summary: summary[cat] = {'expense':0.0, 'income':0.0}
+        if typ == 'income': summary[cat]['income'] += amt
+        else: summary[cat]['expense'] += amt
+    return summary
 
 def monthly_summary():
-    """Generates a detailed summary of income and expenses per category for the current month."""
     now = datetime.datetime.now()
-    start_date = now.strftime("%Y-%m-01")
-    end_date = now.strftime("%Y-%m-%d") # Current day is the end date
+    start = now.strftime("%Y-%m-01")
+    end = now.strftime("%Y-%m-%d")
+    data = get_transaction_data(start, end)
     
-    category_data = get_transaction_data(start_date, end_date)
-    
-    title = f"Monthly Detailed Summary: {now.strftime('%B %Y')}"
-    
-    if not category_data:
-        show_temporary_view(title, Text("[yellow]No transactions recorded this month.[/yellow]"))
+    if not data:
+        show_temporary_view(f"Monthly: {now.strftime('%B %Y')}", Text("[yellow]No data.[/yellow]"))
         return
 
-    table = Table(title="Category Breakdown", title_style="bold yellow", show_header=True, header_style="bold cyan", padding=1)
-    table.add_column("Category", style="bold white", width=20)
-    table.add_column("Total Income", style="green", justify="right")
-    table.add_column("Total Expenses", style="red", justify="right")
-    table.add_column("Net", style="yellow", justify="right")
+    table = Table(title=f"Monthly Breakdown: {now.strftime('%B')}", show_header=True, header_style="bold cyan")
+    table.add_column("Category", width=15); table.add_column("Income", justify="right"); table.add_column("Expense", justify="right"); table.add_column("Net", justify="right")
     
-    total_monthly_income = 0.0
-    total_monthly_expense = 0.0
-
-    for category, amounts in category_data.items():
-        income = amounts['income']
-        expense = amounts['expense']
-        net = income - expense
-        
-        total_monthly_income += income
-        total_monthly_expense += expense
-
-        net_style = "bold green" if net >= 0 else "bold red"
-        
-        table.add_row(
-            category,
-            f"+£{income:,.2f}",
-            f"-£{expense:,.2f}",
-            Text(f"£{net:,.2f}", style=net_style)
-        )
+    t_inc = t_exp = 0
+    for cat, val in data.items():
+        i, e = val['income'], val['expense']
+        t_inc += i; t_exp += e
+        net = i - e
+        style = "bold green" if net >= 0 else "bold red"
+        table.add_row(cat, f"£{i:,.2f}", f"£{e:,.2f}", Text(f"£{net:,.2f}", style=style))
     
-    # Footer Summary (FIXED: Used Text.from_markup to correctly parse color tags)
-    final_net = total_monthly_income - total_monthly_expense
-    final_net_style = "bold green" if final_net >= 0 else "bold red"
-    
-    footer = Group(
-        table,
-        Text("\n" + "="*50),
-        Text.from_markup(f"[green]TOTAL MONTHLY INCOME:  +£{total_monthly_income:,.2f}[/green]"),
-        Text.from_markup(f"[red]TOTAL MONTHLY EXPENSE: -£{total_monthly_expense:,.2f}[/red]"),
-        Text(f"MONTHLY NET BALANCE:   £{final_net:,.2f}", style=final_net_style),
-        Text("="*50)
-    )
-
-    show_temporary_view(title, footer)
+    final_net = t_inc - t_exp
+    footer = Group(table, Text("\n"+"="*40), Text.from_markup(f"[green]Income:  £{t_inc:,.2f}[/green]"), Text.from_markup(f"[red]Expense: £{t_exp:,.2f}[/red]"), Text(f"Net:     £{final_net:,.2f}", style="bold green" if final_net >=0 else "bold red"))
+    show_temporary_view("Monthly Summary", footer)
 
 def weekly_summary():
-    """Generates a summary of income and expenses per category for the current week (Mon-Sun)."""
     now = datetime.datetime.now()
+    start = (now - datetime.timedelta(days=now.weekday())).strftime("%Y-%m-%d")
+    end = (datetime.datetime.strptime(start, "%Y-%m-%d") + datetime.timedelta(days=6)).strftime("%Y-%m-%d")
+    data = get_transaction_data(start, end)
     
-    # Calculate start (Monday) and end (Sunday) of the current week
-    start_date = now - datetime.timedelta(days=now.weekday())
-    end_date = start_date + datetime.timedelta(days=6)
-    
-    start_date_str = start_date.strftime("%Y-%m-%d")
-    end_date_str = end_date.strftime("%Y-%m-%d")
-    
-    category_data = get_transaction_data(start_date_str, end_date_str)
-    
-    title = f"Weekly Summary: {start_date.strftime('%d %b')} - {end_date.strftime('%d %b')}"
-    
-    if not category_data:
-        show_temporary_view(title, Text("[yellow]No transactions recorded this week.[/yellow]"))
+    if not data:
+        show_temporary_view(f"Weekly: {start} to {end}", Text("[yellow]No data.[/yellow]"))
         return
 
-    # Aggregate data for display
-    table = Table(title="Weekly Category Summary", title_style="bold magenta", show_header=True, header_style="bold magenta", padding=1)
-    table.add_column("Category", style="bold white", width=20)
-    table.add_column("Total Expenses", style="red", justify="right")
-    table.add_column("Total Income", style="green", justify="right")
+    table = Table(title="Weekly Breakdown", show_header=True, header_style="bold magenta")
+    table.add_column("Category", width=15); table.add_column("Expense", justify="right"); table.add_column("Income", justify="right")
     
-    total_weekly_expense = 0.0
-    total_weekly_income = 0.0
+    t_inc = t_exp = 0
+    for cat, val in data.items():
+        i, e = val['income'], val['expense']
+        t_inc += i; t_exp += e
+        table.add_row(cat, f"£{e:,.2f}", f"£{i:,.2f}")
+        
+    final_net = t_inc - t_exp
+    footer = Group(table, Text("\n"+"-"*40), Text.from_markup(f"[green]Income:  £{t_inc:,.2f}[/green]"), Text.from_markup(f"[red]Expense: £{t_exp:,.2f}[/red]"), Text(f"Net:     £{final_net:,.2f}", style="bold green" if final_net >=0 else "bold red"))
+    show_temporary_view("Weekly Summary", footer)
 
-    for category, amounts in category_data.items():
-        income = amounts['income']
-        expense = amounts['expense']
-        
-        total_weekly_income += income
-        total_weekly_expense += expense
-        
-        table.add_row(
-            category,
-            f"-£{expense:,.2f}",
-            f"+£{income:,.2f}"
-        )
-    
-    # Footer Summary (FIXED: Used Text.from_markup to correctly parse color tags)
-    final_net = total_weekly_income - total_weekly_expense
-    final_net_style = "bold green" if final_net >= 0 else "bold red"
-    
-    footer = Group(
-        table,
-        Text("\n" + "-"*50),
-        Text.from_markup(f"[green]TOTAL WEEKLY INCOME:  +£{total_weekly_income:,.2f}[/green]"),
-        Text.from_markup(f"[red]TOTAL WEEKLY EXPENSE: -£{total_weekly_expense:,.2f}[/red]"),
-        Text(f"WEEKLY NET BALANCE:   £{final_net:,.2f}", style=final_net_style),
-        Text("-"*50)
-    )
-    
-    show_temporary_view(title, footer)
+# --- RECURRING & TEMPLATE FUNCTIONS ---
 
 def get_recurring_templates():
-    """Fetches all recurring templates with the new due_day."""
     conn = sqlite3.connect(DATABASE_SETTINGS)
-    cursor = conn.cursor()
-    # Ensure all columns are explicitly selected, including the new 'due_day'
-    cursor.execute("SELECT id, name, amount, category, description, due_day FROM recurring_templates")
-    templates = cursor.fetchall()
+    cur = conn.cursor()
+    cur.execute("SELECT id, name, amount, category, description, due_day FROM recurring_templates")
+    rows = cur.fetchall()
     conn.close()
-    return templates
+    return rows
+
+def manage_recurring_templates():
+    templates = get_recurring_templates()
+    CONSOLE.clear()
+    CONSOLE.print(Panel("[bold orange1]Manage Recurring Templates[/bold orange1]", border_style="orange1"))
+    
+    if templates:
+        # Widen columns and add ID
+        table = Table(title="Templates", show_header=True, header_style="bold orange1")
+        table.add_column("ID", width=4, style="dim")
+        table.add_column("Day", width=4, justify="center", style="yellow")
+        table.add_column("Name", width=20, style="bold white")
+        table.add_column("Amount", width=12, justify="right", style="red")
+        table.add_column("Category", width=15, style="cyan")
+        
+        for tid, name, amt, cat, desc, day in templates:
+            table.add_row(str(tid), str(day), name, f"£{amt:,.2f}", cat)
+        CONSOLE.print(table)
+        
+        CONSOLE.print("\n[yellow]NOTE: Since Name is not unique, use the ID when deleting or applying a template.[/yellow]")
+    else:
+        CONSOLE.print("[yellow]No templates.[/yellow]")
+        
+    CONSOLE.print("\n[1] Add New | [2] Delete | [C] Cancel")
+    ch = input("Choice: ").upper().strip()
+    if ch == '1': return add_recurring_template()
+    if ch == '2': return delete_recurring_template(templates)
+    return "Cancelled."
+
+def add_recurring_template():
+    count = 0
+    while True:
+        os.system('cls' if os.name == 'nt' else 'clear')
+        CONSOLE.print(Panel(f"[bold green]Add Recurring Template ({count} added)[/bold green]"))
+        name = input("Name (or C to stop): ").strip()
+        if name.upper() == 'C': break
+        
+        try: amt = float(input("Amount (£): ")); day = int(input("Due Day (1-31): "))
+        except: CONSOLE.print("[red]Invalid input.[/red]"); continue
+        
+        cat = input("Category: ").strip() or "Uncategorized"
+        desc = input("Desc: ").strip()
+        
+        conn = sqlite3.connect(DATABASE_SETTINGS)
+        cur = conn.cursor()
+        # Insert allowing duplicates (no UNIQUE constraint on name)
+        cur.execute("INSERT INTO recurring_templates (name, amount, category, description, due_day) VALUES (?, ?, ?, ?, ?)",
+                   (name, amt, cat, desc, day))
+        conn.commit(); conn.close()
+        count += 1
+        CONSOLE.print(f"[green]Added '{name}'[/green]")
+        if input("Add another? (y/n): ").lower() != 'y': break
+    return f"Added {count} templates."
+
+def delete_recurring_template(templates):
+    os.system('cls' if os.name == 'nt' else 'clear')
+    if not templates: return "[yellow]None to delete.[/yellow]"
+    
+    CONSOLE.print(Panel("[bold red]Delete Template[/bold red]"))
+    # Reprint table for context if needed, or user remembers ID
+    while True:
+        tid = input("ID to delete (C to cancel): ").upper().strip()
+        if tid == 'C': return "Cancelled."
+        try: tid_int = int(tid); break
+        except: pass
+        
+    conn = sqlite3.connect(DATABASE_SETTINGS)
+    cur = conn.cursor()
+    cur.execute("DELETE FROM recurring_templates WHERE id = ?", (tid_int,))
+    if cur.rowcount > 0:
+        conn.commit(); conn.close()
+        return f"[green]Deleted ID {tid_int}.[/green]"
+    conn.close()
+    return "[red]ID not found.[/red]"
+
+def apply_recurring_template():
+    templates = get_recurring_templates()
+    if not templates: return "[red]No templates found.[/red]"
+    
+    CONSOLE.clear()
+    CONSOLE.print(Panel("[bold green]Apply Recurring[/bold green]"))
+    
+    # Show templates
+    table = Table(show_header=True, header_style="bold green")
+    table.add_column("ID", width=4); table.add_column("Name", width=20); table.add_column("Amount", justify="right")
+    t_map = {}
+    for tid, name, amt, cat, desc, day in templates:
+        table.add_row(str(tid), name, f"£{amt:,.2f}")
+        t_map[tid] = (name, amt, cat, desc)
+    CONSOLE.print(table)
+    
+    while True:
+        tid = input("ID to apply (C to cancel): ").upper().strip()
+        if tid == 'C': return "Cancelled."
+        try: 
+            tid_int = int(tid)
+            if tid_int in t_map: break
+        except: pass
+        CONSOLE.print("[red]Invalid ID.[/red]")
+        
+    name, amt, cat, desc = t_map[tid_int]
+    today = datetime.datetime.now().strftime("%Y-%m-%d")
+    
+    conn = sqlite3.connect(DATABASE_EXPENSES)
+    cur = conn.cursor()
+    cur.execute("INSERT INTO transactions (amount, category, description, date, type) VALUES (?, ?, ?, ?, ?)",
+               (amt, cat, f"Recurring payment: {name}", today, 'expense'))
+    conn.commit(); conn.close()
+    return f"[green]Applied '{name}' (£{amt:,.2f}).[/green]"
 
 def get_scheduled_transactions():
-    """Returns a list of tuples containing (amount, description, date_str) for all upcoming expenses."""
     now = datetime.datetime.now().date()
-    current_year_month = now.strftime("%Y-%m")
-    
-    # 1. Fetch all recurring templates
+    ym = now.strftime("%Y-%m")
     templates = get_recurring_templates()
     
-    # 2. Get transactions already recorded this month for comparison
-    conn_exp = sqlite3.connect(DATABASE_EXPENSES)
-    cursor_exp = conn_exp.cursor()
-    # Only check for transactions recorded in the current month
-    cursor_exp.execute(f"SELECT description FROM transactions WHERE date LIKE '{current_year_month}-%' AND type='expense'")
-    recorded_descriptions = [row[0] for row in cursor_exp.fetchall()]
-    conn_exp.close()
-
+    # Get recorded descriptions for current month
+    conn = sqlite3.connect(DATABASE_EXPENSES)
+    cur = conn.cursor()
+    cur.execute(f"SELECT description FROM transactions WHERE date LIKE '{ym}-%' AND type='expense'")
+    recorded = [r[0] for r in cur.fetchall()]
+    
+    # Get one-off major expenses
+    cur.execute("SELECT amount, description, date FROM transactions WHERE amount > 50 AND type='expense' AND date >= ? ORDER BY date ASC", (now.strftime('%Y-%m-%d'),))
+    major = cur.fetchall()
+    conn.close()
+    
     scheduled = []
-    for tid, name, amount, category, desc, due_day in templates:
-        # Determine the date for this month
-        try:
-            # Handle cases where the due_day might exceed the days in the current month (e.g., Feb 30)
-            scheduled_date = datetime.date(now.year, now.month, due_day)
-        except ValueError:
-            # If the day doesn't exist, schedule for the last day of the month
-            import calendar
-            last_day = calendar.monthrange(now.year, now.month)[1]
-            scheduled_date = datetime.date(now.year, now.month, last_day)
-
+    for tid, name, amt, cat, desc, day in templates:
+        try: d = datetime.date(now.year, now.month, day)
+        except: d = datetime.date(now.year, now.month, 28) # Fallback
         
-        date_str = scheduled_date.strftime("%Y-%m-%d")
-        description = f"Recurring payment: {name}"
+        desc_check = f"Recurring payment: {name}"
+        is_rec = desc_check in recorded
         
-        is_recorded = description in recorded_descriptions
+        scheduled.append({'date': d.strftime("%Y-%m-%d"), 'amount': amt, 'desc': name, 'type': 'recurring', 'done': is_rec})
 
-        scheduled.append({
-            'amount': amount,
-            'description': description,
-            'date_str': date_str,
-            'is_recurring': True,
-            'is_recorded': is_recorded
-        })
-        
-    # 3. Fetch large one-off expenses (> 50) as before
-    conn_exp = sqlite3.connect(DATABASE_EXPENSES)
-    cursor_exp = conn_exp.cursor()
-    # Filter for large, unrecorded one-off expenses in the near future
-    cursor_exp.execute("SELECT amount, description, date FROM transactions WHERE amount > 50 AND type='expense' AND date >= ? ORDER BY date ASC", (now.strftime('%Y-%m-%d'),))
-    major_expenses = cursor_exp.fetchall()
-    conn_exp.close()
-
-    for amount, desc, date_str in major_expenses:
-        scheduled.append({
-            'amount': amount,
-            'description': desc,
-            'date_str': date_str,
-            'is_recurring': False,
-            'is_recorded': True # Already recorded, just displaying it
-        })
+    for amt, desc, d_str in major:
+        scheduled.append({'date': d_str, 'amount': amt, 'desc': desc, 'type': 'one-off', 'done': True})
         
     return scheduled
 
 def upcoming_calendar():
-    """
-    Displays a calendar view for the current week showing dates and notes 
-    for all scheduled recurring payments and major expenses.
-    """
     now = datetime.datetime.now().date()
-    # Find the start of the current week (Monday)
-    start_of_week = now - datetime.timedelta(days=now.weekday())
-    end_of_week = start_of_week + datetime.timedelta(days=6)
+    start = now - datetime.timedelta(days=now.weekday())
+    events = get_scheduled_transactions()
     
-    title = f"Upcoming Calendar View: {start_of_week.strftime('%d %b')} - {end_of_week.strftime('%d %b')}"
+    table = Table(title=f"Week of {start.strftime('%d %b')}", show_header=True, padding=1)
+    days = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
+    for d in days: table.add_column(d, justify="center")
     
-    # Get all scheduled and major expenses
-    scheduled_events = get_scheduled_transactions()
-
-    # The calendar table
-    calendar_table = Table(title=f"Week of {start_of_week.strftime('%d %b')}", title_style="bold white", show_header=True, header_style="bold yellow", padding=1)
-    
-    days_of_week = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
-    for day in days_of_week:
-        calendar_table.add_column(day, justify="center")
-
-    all_rows = []
-    current_row = []
-    
-    # Iterate through only 1 week (1 row)
-    for day_offset in range(7):
-        current_date = start_of_week + datetime.timedelta(days=day_offset)
-        date_str = current_date.strftime("%Y-%m-%d")
+    row_cells = []
+    for i in range(7):
+        curr = start + datetime.timedelta(days=i)
+        d_str = curr.strftime("%Y-%m-%d")
         
-        # Start the cell content with the date number
-        cell_text = Text(current_date.strftime("%d"), style="bold white")
+        cell = Text(curr.strftime("%d"), style="bold white")
+        if curr == now: cell.style = "bold yellow on blue"
+        elif curr < now: cell.style = "dim"
         
-        if current_date < now:
-            cell_text.style = "dim"
-        elif current_date == now:
-            cell_text.style = "bold yellow on blue"
-            
-        expense_notes = []
-        for event in scheduled_events:
-            if event['date_str'] == date_str:
-                amount = event['amount']
-                desc = event['description']
-                
-                if event['is_recurring']:
-                    if event['is_recorded']:
-                        # Auto-applied recurring payment
-                        style = "bold green"
-                        note_text = f"✓ R-£{amount:,.0f}"
-                    else:
-                        # Scheduled recurring payment (Reminder)
-                        style = "bold red"
-                        note_text = f"✗ R-£{amount:,.0f}"
+        for e in events:
+            if e['date'] == d_str:
+                amt = e['amount']
+                if e['type'] == 'recurring':
+                    icon = "✓" if e['done'] else "✗"
+                    style = "green" if e['done'] else "red"
+                    cell.append(Text.from_markup(f"\n[{style}]{icon}£{amt:.0f}[/{style}]"))
                 else:
-                    # Large one-off expense
-                    style = "bold red"
-                    note_text = f"O-£{amount:,.0f}"
-                    
-                # Truncate description for display in the calendar cell
-                desc_part = desc.split(':')[-1].strip()
-                note_desc = f" ({desc_part[:8]}...)" if len(desc_part) > 8 else f" ({desc_part})"
-                
-                # FIX: Use Text.from_markup() to correctly parse the rich markup string 
-                # before appending it to the main cell_text object.
-                note_line = Text.from_markup(f"\n[{style}]{note_text}[/{style}]{note_desc}")
-                expense_notes.append(note_line)
-
-        # Append all expense notes (which are now Text objects) to the main cell Text object
-        for note in expense_notes:
-            cell_text.append(note)
+                    cell.append(Text.from_markup(f"\n[red]!£{amt:.0f}[/red]"))
+        row_cells.append(cell)
         
-        current_row.append(cell_text)
+    table.add_row(*row_cells)
     
-    all_rows.append(current_row)
+    # FIX: Use Text.from_markup() here to correctly render the Rich tags in the legend.
+    legend_text = Text.from_markup("\nLegend: [red]✗[/red] Due | [green]✓[/green] Paid | [red]![/red] Large Exp")
+    show_temporary_view("Calendar", Group(table, legend_text))
 
-    # Add rows to the table
-    for row in all_rows:
-        calendar_table.add_row(*row)
+def check_and_apply_recurring_payments():
+    # Simple check on startup
+    now = datetime.datetime.now()
+    today_day = now.day
+    ym = now.strftime("%Y-%m")
+    today_str = now.strftime("%Y-%m-%d")
     
-    legend = Text.from_markup("\n[bold]Legend:[/bold] [bold red]✗ R[/bold red]=Recurring Due | [bold green]✓ R[/bold green]=Recurring Paid | [bold red]O[/bold red]=One-Off > £50")
-    content = Group(
-        calendar_table,
-        legend
-    )
-        
-    show_temporary_view(title, content)
+    conn_s = sqlite3.connect(DATABASE_SETTINGS)
+    cur_s = conn_s.cursor()
+    
+    # Get last check
+    try: 
+        cur_s.execute("CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT)")
+        last = cur_s.execute("SELECT value FROM meta WHERE key='last_check'").fetchone()
+    except: last = None
+    
+    # If checked today, skip
+    if last and last[0] == today_str: 
+        conn_s.close(); return None
+    
+    # Mark checked
+    cur_s.execute("INSERT OR REPLACE INTO meta (key, value) VALUES ('last_check', ?)", (today_str,))
+    conn_s.commit()
+    
+    templates = get_recurring_templates()
+    conn_s.close()
+    
+    conn_e = sqlite3.connect(DATABASE_EXPENSES)
+    cur_e = conn_e.cursor()
+    
+    applied = []
+    for tid, name, amt, cat, desc, day in templates:
+        if day == today_day:
+            check_desc = f"Recurring payment: {name}"
+            # Check if paid this month
+            count = cur_e.execute(f"SELECT COUNT(*) FROM transactions WHERE description=? AND date LIKE '{ym}-%'", (check_desc,)).fetchone()[0]
+            if count == 0:
+                cur_e.execute("INSERT INTO transactions (amount, category, description, date, type) VALUES (?, ?, ?, ?, ?)",
+                             (amt, cat, check_desc, today_str, 'expense'))
+                applied.append(name)
+    
+    conn_e.commit(); conn_e.close()
+    
+    if applied: return f"[green]Auto-paid: {', '.join(applied)}[/green]"
+    return None
 
-# --- Savings Goal Functions ---
+# --- Category Management ---
 
 def set_savings_goal():
-    """Sets a target amount for the savings goal."""
-    # We rely on main loop clear before display_dashboard is called
-    CONSOLE.print(Panel("[bold yellow]Set Savings Goal Target[/bold yellow]", border_style="yellow"))
-    
+    CONSOLE.clear()
+    CONSOLE.print(Panel("[bold yellow]Set Savings Goal[/bold yellow]"))
     while True:
         try:
-            target = float(input("Enter new savings goal target (£): "))
-            if target <= 0:
-                CONSOLE.print("[bold red]Target must be a positive number.[/bold red]")
+            target = float(input("Enter Goal Target (£): "))
+            current = float(input("Enter Current Saved Amount (£): "))
+            if target <= 0 or current < 0:
+                CONSOLE.print("[red]Target must be positive, and current saved must be non-negative.[/red]")
                 continue
             break
         except ValueError:
-            CONSOLE.print("[bold red]Invalid number format.[/bold red]")
-
+            CONSOLE.print("[red]Invalid number.[/red]")
+            
     conn = sqlite3.connect(DATABASE_SETTINGS)
-    cursor = conn.cursor()
+    cur = conn.cursor()
+    cur.execute("INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)", ('goal_target', str(target)))
+    cur.execute("INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)", ('current_saved', str(current)))
+    conn.commit()
+    conn.close()
+    return f"[green]Savings goal set to £{target:,.2f} with £{current:,.2f} saved.[/green]"
+
+def add_to_savings():
+    CONSOLE.clear()
+    CONSOLE.print(Panel("[bold green]Add to Savings[/bold green]"))
+    goal_target, current_saved = get_savings_goal()
+    if goal_target == 0: return "[red]Set a savings goal first (Option 8).[/red]"
     
-    # Set the goal target
-    cursor.execute("INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)", ('goal_target', str(target)))
+    CONSOLE.print(f"[cyan]Current Saved: £{current_saved:,.2f} / Goal: £{goal_target:,.2f}[/cyan]")
     
-    # Initialize current saved amount if it doesn't exist
-    cursor.execute("INSERT OR IGNORE INTO settings (key, value) VALUES (?, ?)", ('current_saved', '0.0'))
+    while True:
+        try:
+            amount = float(input("Enter amount to add (£): "))
+            if amount <= 0:
+                CONSOLE.print("[red]Amount must be positive.[/red]")
+                continue
+            break
+        except ValueError:
+            CONSOLE.print("[red]Invalid number.[/red]")
+
+    new_saved = current_saved + amount
     
+    conn = sqlite3.connect(DATABASE_SETTINGS)
+    cur = conn.cursor()
+    cur.execute("INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)", ('current_saved', str(new_saved)))
     conn.commit()
     conn.close()
     
-    return f"[bold green]Savings goal set to £{target:,.2f}.[/bold green]"
-
-def add_to_savings():
-    """Transfers money from Net Balance to the Savings Goal."""
-    goal_target, current_saved = get_savings_goal()
-
-    if goal_target <= 0:
-        return "[bold red]Error: Please set a savings goal first (Option 8).[/bold red]"
-
-    _, _, net_balance = get_financial_summary()
+    # Also record as an expense (transfer out)
+    today = datetime.datetime.now().strftime("%Y-%m-%d")
+    conn_exp = sqlite3.connect(DATABASE_EXPENSES)
+    cur_exp = conn_exp.cursor()
+    cur_exp.execute("INSERT INTO transactions (amount, category, description, date, type) VALUES (?, ?, ?, ?, ?)",
+                   (amount, 'Savings Transfer', 'Transfer to Savings Goal', today, 'expense'))
+    conn_exp.commit()
+    conn_exp.close()
     
-    # We rely on main loop clear before display_dashboard is called
-    CONSOLE.print(Panel("[bold green]Add to Savings Goal[/bold green]", border_style="green"))
-    CONSOLE.print(f"Current Net Balance: [bold cyan]£{net_balance:,.2f}[/bold cyan]")
-    CONSOLE.print(f"Goal Progress: [bold yellow]£{current_saved:,.2f}[/bold yellow] / [bold yellow]£{goal_target:,.2f}[/bold yellow]")
+    return f"[green]Added £{amount:,.2f}. New saved total: £{new_saved:,.2f}[/green]"
+
+def add_category_to_db(name):
+    conn = sqlite3.connect(DATABASE_SETTINGS)
+    try: 
+        conn.execute("INSERT INTO categories (name) VALUES (?)", (name,))
+        conn.commit(); msg = f"[bold green]Added category: {name}[/bold green]"
+    except sqlite3.IntegrityError: msg = f"[yellow]Category {name} already exists.[/yellow]"
+    except Exception as e: msg = f"[bold red]Error adding category: {e}[/bold red]"
+    conn.close()
+    return msg
+
+def delete_category():
+    CONSOLE.clear()
+    CONSOLE.print(Panel("[bold red]Delete Category[/bold red]", border_style="red"))
     
+    categories_with_ids = get_categories_with_ids()
+    
+    # Display deletable categories (not protected)
+    deletable_cats_with_ids = [(i, name) for i, name in categories_with_ids if name not in PROTECTED_CATEGORIES]
+    
+    if not deletable_cats_with_ids:
+        return "[yellow]No custom categories available for deletion.[/yellow]"
+        
+    cat_list_table = Table(title="Custom Categories (Deletable)", show_header=True, header_style="bold cyan")
+    cat_list_table.add_column("ID", style="yellow", width=4)
+    cat_list_table.add_column("Name", style="cyan")
+    
+    id_map = {}
+    for cat_id, name in deletable_cats_with_ids:
+        cat_list_table.add_row(str(cat_id), name)
+        id_map[str(cat_id)] = name
+        
+    CONSOLE.print(cat_list_table)
+    
+    CONSOLE.print(f"\n[dim]The following are protected and cannot be deleted: {', '.join(PROTECTED_CATEGORIES)}[/dim]")
+
     while True:
-        try:
-            transfer_amount = float(input("Enter amount to transfer to savings (£): "))
-            if transfer_amount <= 0:
-                CONSOLE.print("[bold red]Amount must be positive.[/bold red]")
-                continue
-            
-            # Check if user has enough balance
-            if transfer_amount > net_balance:
-                CONSOLE.print("[bold red]Insufficient funds in Net Balance.[/bold red]")
-                continue
-            
+        id_to_delete = input("\nEnter ID to delete (C to cancel): ").strip()
+        if id_to_delete.upper() == 'C': return "Deletion cancelled."
+        
+        cat_to_delete = id_map.get(id_to_delete)
+        
+        if cat_to_delete:
             break
-        except ValueError:
-            CONSOLE.print("[bold red]Invalid number format.[/bold red]")
-            
-    # 1. Update Savings Goal
-    new_saved = current_saved + transfer_amount
+        
+        CONSOLE.print("[bold red]Invalid ID.[/bold red]")
+
+
+    if input(f"Are you sure you want to delete '{cat_to_delete}'? All transactions will be moved to 'Uncategorized'. (y/n): ").lower() != 'y':
+        return "Deletion cancelled."
+
+    # 1. Reassign transactions to 'Uncategorized'
+    conn_exp = sqlite3.connect(DATABASE_EXPENSES)
+    cur_exp = conn_exp.cursor()
+    cur_exp.execute("UPDATE transactions SET category = 'Uncategorized' WHERE category = ?", (cat_to_delete,))
+    affected_rows = cur_exp.rowcount
+    conn_exp.commit()
+    conn_exp.close()
+
+    # 2. Delete category from settings database
     conn_set = sqlite3.connect(DATABASE_SETTINGS)
-    cursor_set = conn_set.cursor()
-    cursor_set.execute("UPDATE settings SET value = ? WHERE key = 'current_saved'", (str(new_saved),))
+    cur_set = conn_set.cursor()
+    cur_set.execute("DELETE FROM categories WHERE name = ?", (cat_to_delete,))
     conn_set.commit()
     conn_set.close()
 
-    # 2. Record as a special 'Transfer' expense transaction
-    conn_exp = sqlite3.connect(DATABASE_EXPENSES)
-    cursor_exp = conn_exp.cursor()
-    date_str = datetime.datetime.now().strftime("%Y-%m-%d")
-    cursor_exp.execute("INSERT INTO transactions (amount, category, description, date, type) VALUES (?, ?, ?, ?, ?)",
-                       (transfer_amount, 'Savings Transfer', 'Transfer to Savings Goal', date_str, 'expense'))
-    conn_exp.commit()
-    conn_exp.close()
-    
-    return f"[bold green]£{transfer_amount:,.2f} transferred and recorded as expense. Saved amount is now £{new_saved:,.2f}.[/bold green]"
-
-# --- Recurring Template Functions ---
-
-def manage_recurring_templates():
-    """Allows user to view, add, or delete recurring transaction templates."""
-    templates = get_recurring_templates()
-
-    # We rely on main loop clear before display_dashboard is called
-    CONSOLE.print(Panel("[bold orange1]Manage Recurring Templates[/bold orange1]", border_style="orange1"))
-
-    if templates:
-        table = Table(title="Available Templates", show_header=True, header_style="bold orange1")
-        table.add_column("ID", style="dim", width=7)
-        table.add_column("Due Day", style="yellow", width=8, justify="center") # New Column
-        table.add_column("Name", style="bold white", width=20)
-        table.add_column("Amount", style="red", width=10, justify="right")
-        table.add_column("Category", style="cyan", width=15)
-        
-        for tid, name, amount, category, desc, due_day in templates:
-            table.add_row(str(tid), str(due_day), name, f"£{amount:,.2f}", category)
-        
-        CONSOLE.print(table)
-    else:
-        CONSOLE.print("[yellow]No recurring templates defined yet.[/yellow]")
-
-    # Sub-menu for management
-    CONSOLE.print("\n[1] Add New Template(s) | [2] Delete Template | [C] Cancel")
-    choice = input("Select an option: ").upper().strip()
-
-    if choice == '1':
-        return add_recurring_template() # Now handles the loop internally
-    elif choice == '2':
-        return delete_recurring_template(templates)
-    else:
-        return "Template management cancelled."
+    return f"[bold green]Category '{cat_to_delete}' deleted. {affected_rows} transaction(s) reassigned to 'Uncategorized'.[/bold green]"
 
 
-def add_recurring_template():
-    """
-    Adds one or more new recurring templates in a continuous loop 
-    until the user chooses to stop.
-    """
-    templates_added = 0
-    
-    while True:
-        # Clear the screen only when entering the template creation loop
-        os.system('cls' if os.name == 'nt' else 'clear')
-        CONSOLE.print(Panel(f"[bold green]Add New Recurring Template ({templates_added} added)[/bold green]", border_style="green"))
-        
-        # 1. Get Name (and allow for cancel)
-        name_input = input("Enter Template Name (e.g., Rent, Netflix, or 'C' to cancel): ").strip()
-        if name_input.upper() == 'C':
-            break
-        
-        name = name_input
-        
-        # 2. Get Amount
-        while True:
-            try:
-                amount = float(input("Enter monthly amount (£): "))
-                if amount <= 0:
-                    CONSOLE.print("[bold red]Amount must be positive.[/bold red]")
-                    continue
-                break
-            except ValueError:
-                CONSOLE.print("[bold red]Invalid number format.[/bold red]")
-
-        # 3. Get Due Day of Month
-        while True:
-            try:
-                due_day = int(input("Enter Due Day of Month (1-31, e.g., 5 for the 5th): "))
-                if 1 <= due_day <= 31:
-                    break
-                CONSOLE.print("[bold red]Due day must be between 1 and 31.[/bold red]")
-            except ValueError:
-                CONSOLE.print("[bold red]Invalid number format for due day.[/bold red]")
-
-        # 4. Get Category
-        category = input("Enter Category: ").strip()
-        if not category:
-            category = "Uncategorized"
-            
-        # 5. Get Description
-        description = input("Enter description (optional): ").strip()
-
-        # 6. Save to DB
-        conn = sqlite3.connect(DATABASE_SETTINGS)
-        cursor = conn.cursor()
-        
-        try:
-            cursor.execute("INSERT INTO recurring_templates (name, amount, category, description, due_day) VALUES (?, ?, ?, ?, ?)",
-                           (name, amount, category, description, due_day))
-            conn.commit()
-            templates_added += 1
-            CONSOLE.print(f"[bold green]Template '{name}' (Due Day: {due_day}) added successfully.[/bold green]")
-        except sqlite3.IntegrityError:
-            CONSOLE.print(f"[bold red]Error: Template name '{name}' already exists. Skipping.[/bold red]")
-        finally:
-            conn.close()
-
-        # 7. Ask for continuation
-        if input("\nDo you want to add another template? (y/n): ").lower() != 'y':
-            break
-    
-    if templates_added > 0:
-        return f"[bold green]Finished adding templates. Total added: {templates_added}.[/bold green]"
-    return "Template addition cancelled."
-
-def delete_recurring_template(templates):
-    """Deletes a recurring template by ID."""
-    # We clear again if we come from manage_recurring_templates
+def manage_categories_full():
     os.system('cls' if os.name == 'nt' else 'clear')
-    CONSOLE.print(Panel("[bold red]Delete Recurring Template[/bold red]", border_style="red"))
+    CONSOLE.print(Panel("[bold yellow]Manage Categories[/bold yellow]", border_style="yellow"))
     
-    if not templates:
-        return "[yellow]No templates to delete.[/yellow]"
+    categories_with_ids = get_categories_with_ids()
+    
+    cat_list_table = Table(title="Current Categories", show_header=True, header_style="bold cyan")
+    cat_list_table.add_column("ID", style="yellow", width=4)
+    cat_list_table.add_column("Name", style="cyan")
+    
+    for cat_id, name in categories_with_ids:
+        cat_list_table.add_row(str(cat_id), name)
         
-    while True:
-        try:
-            tid = input("\nEnter ID of template to delete (or 'C' to cancel): ").upper().strip()
-            if tid == 'C':
-                return "Deletion cancelled."
-            tid_int = int(tid)
-            break
-        except ValueError:
-            CONSOLE.print("[bold red]Invalid ID. Please enter a number or 'C'.[/bold red]")
-            
-    conn = sqlite3.connect(DATABASE_SETTINGS)
-    cursor = conn.cursor()
-    cursor.execute("DELETE FROM recurring_templates WHERE id = ?", (tid_int,))
+    CONSOLE.print(cat_list_table)
     
-    if cursor.rowcount > 0:
-        conn.commit()
-        result_msg = f"\n[bold green]Template ID {tid_int} deleted successfully.[/bold green]"
-    else:
-        result_msg = f"\n[bold red]Error: No template found with ID {tid_int}.[/bold red]"
+    CONSOLE.print("\n[1] Add New | [2] Delete | [C] Cancel")
+    ch = input("Choice: ").upper().strip()
     
-    conn.close()
-    return result_msg
+    if ch == '1': 
+        name = input("Enter new category name: ").strip()
+        if name: return add_category_to_db(name)
+        else: return "[red]Category name cannot be empty.[/red]"
+    elif ch == '2':
+        return delete_category()
+    
+    return "Category management cancelled."
 
-def apply_recurring_template():
-    """Applies a recurring template, recording it as an expense transaction."""
-    templates = get_recurring_templates()
-
-    if not templates:
-        return "[bold red]No recurring templates found. Use option 10 to create one first.[/bold red]"
-
-    # We rely on main loop clear before display_dashboard is called
-    CONSOLE.print(Panel("[bold green]Apply Recurring Payment[/bold green]", border_style="green"))
-    
-    # Display templates for selection
-    table = Table(title="Select Template", show_header=True, header_style="bold green")
-    table.add_column("ID", style="dim", width=7)
-    table.add_column("Due Day", style="yellow", width=7, justify="center")
-    table.add_column("Name", style="bold white", width=20)
-    table.add_column("Amount", style="red", width=10)
-    table.add_column("Category", style="cyan", width=15)
-    
-    template_map = {}
-    for tid, name, amount, category, _, due_day in templates:
-        table.add_row(str(tid), str(due_day), name, f"£{amount:,.2f}", category)
-        # Store as a dict for easy lookup
-        template_map[tid] = {'amount': amount, 'category': category, 'name': name}
-    
-    CONSOLE.print(table)
-
-    while True:
-        try:
-            template_id_input = input("\nEnter ID of template to apply (or 'C' to cancel): ").upper().strip()
-            if template_id_input == 'C':
-                return "Application cancelled."
-                
-            template_id = int(template_id_input)
-            
-            if template_id not in template_map:
-                CONSOLE.print("[bold red]Invalid Template ID.[/bold red]")
-                continue
-                
-            break
-        except ValueError:
-            CONSOLE.print("[bold red]Invalid ID. Please enter a number or 'C'.[/bold red]")
-
-    template_data = template_map[template_id]
-    amount = template_data['amount']
-    category = template_data['category']
-    name = template_data['name']
-    
-    date_str = datetime.datetime.now().strftime("%Y-%m-%d")
-    description = f"Recurring payment: {name}"
-
-    # Record the expense transaction
-    conn_exp = sqlite3.connect(DATABASE_EXPENSES)
-    cursor_exp = conn_exp.cursor()
-    cursor_exp.execute("INSERT INTO transactions (amount, category, description, date, type) VALUES (?, ?, ?, ?, ?)",
-                       (amount, category, description, date_str, 'expense'))
-    conn_exp.commit()
-    conn_exp.close()
-    
-    return f"[bold green]Successfully applied recurring payment '{name}' (Expense: £{amount:,.2f}) manually.[/bold green]"
-
-# --- Category Management Functions ---
-
-def add_category_to_db(category_name):
-    """Helper function to add a category to the database."""
-    category_name = category_name.strip()
-    if not category_name:
-        return "[bold red]Category name cannot be empty.[/bold red]"
-    
-    conn = sqlite3.connect(DATABASE_SETTINGS)
-    cursor = conn.cursor()
-    try:
-        cursor.execute("INSERT INTO categories (name) VALUES (?)", (category_name,))
-        conn.commit()
-        return f"[bold green]Category '{category_name}' added.[/bold green]"
-    except sqlite3.IntegrityError:
-        return f"[yellow]Category '{category_name}' already exists.[/yellow]"
-    finally:
-        conn.close()
-
-def manage_categories():
-    """Provides a menu to view, add, or delete categories."""
-    os.system('cls' if os.name == 'nt' else 'clear')
-    CONSOLE.print(Panel("[bold yellow]Manage Budget Categories[/bold yellow]", border_style="yellow"))
-
-    categories = get_categories()
-    
-    table = Table(title="Current Categories", title_style="bold yellow", show_header=True, header_style="bold cyan")
-    table.add_column("Category Name", style="bold white")
-    
-    for cat in categories:
-        table.add_row(cat)
-    
-    CONSOLE.print(table)
-    
-    CONSOLE.print("\n[1] Add New Category | [2] Delete Category | [C] Cancel")
-    choice = input("Select an option: ").upper().strip()
-
-    if choice == '1':
-        return prompt_add_category()
-    elif choice == '2':
-        return prompt_delete_category(current_categories=categories)
-    else:
-        return "Category management cancelled."
-
-def prompt_add_category():
-    """Prompts user to add a new category."""
-    os.system('cls' if os.name == 'nt' else 'clear')
-    CONSOLE.print(Panel("[bold green]Add New Category[/bold green]", border_style="green"))
-    name = input("Enter new category name: ").strip()
-    return add_category_to_db(name)
-
-def prompt_delete_category(current_categories):
-    """Prompts user to delete an existing category."""
-    os.system('cls' if os.name == 'nt' else 'clear')
-    CONSOLE.print(Panel("[bold red]Delete Category[/bold red]", border_style="red"))
-    
-    if not current_categories:
-        return "[yellow]No categories to delete.[/yellow]"
-        
-    name = input("Enter category name to delete: ").strip()
-    
-    # Preventing deletion of critical categories
-    if name in ["Uncategorized", "Savings Transfer"]:
-        return f"[bold red]Error: '{name}' is a system category and cannot be deleted.[/bold red]"
-        
-    if name not in current_categories:
-        return f"[bold red]Error: Category '{name}' not found.[/bold red]"
-
-    conn = sqlite3.connect(DATABASE_SETTINGS)
-    cursor = conn.cursor()
-    
-    # 1. Check if category is used in transactions
-    conn_exp = sqlite3.connect(DATABASE_EXPENSES)
-    cursor_exp = conn_exp.cursor()
-    cursor_exp.execute("SELECT COUNT(*) FROM transactions WHERE category = ?", (name,))
-    usage_count = cursor_exp.fetchone()[0]
-    conn_exp.close()
-
-    if usage_count > 0:
-        if input(f"Warning: '{name}' is used in {usage_count} transactions. Delete anyway and re-categorize transactions to 'Uncategorized'? (y/n): ").lower() != 'y':
-            conn.close()
-            return "Deletion cancelled."
-            
-        # 2. Re-categorize old transactions
-        conn_exp = sqlite3.connect(DATABASE_EXPENSES)
-        cursor_exp = conn_exp.cursor()
-        cursor_exp.execute("UPDATE transactions SET category = 'Uncategorized' WHERE category = ?", (name,))
-        conn_exp.commit()
-        conn_exp.close()
-        
-    # 3. Delete the category from the settings database
-    cursor.execute("DELETE FROM categories WHERE name = ?", (name,))
-    
-    if cursor.rowcount > 0:
-        conn.commit()
-        result_msg = f"[bold green]Category '{name}' deleted and {usage_count} transactions moved to 'Uncategorized'.[/bold green]"
-    else:
-        result_msg = f"[bold red]Error deleting category '{name}'.[/bold red]"
-    
-    conn.close()
-    return result_msg
-
-# --- Automation Function ---
-
-def check_and_apply_recurring_payments():
-    """
-    Checks if any recurring payments are due today and have not been recorded 
-    in the current month. If so, records them automatically.
-    """
-    now = datetime.datetime.now()
-    today_day = now.day
-    current_date_str = now.strftime("%Y-%m-%d")
-    current_month_prefix = now.strftime("%Y-%m-")
-    
-    templates = get_recurring_templates()
-    
-    conn_exp = sqlite3.connect(DATABASE_EXPENSES)
-    cursor_exp = conn_exp.cursor()
-    
-    applied_templates = []
-
-    for tid, name, amount, category, _, due_day in templates:
-        # Check if today is the due day
-        if due_day == today_day:
-            description = f"Recurring payment: {name}"
-            
-            # Check if this payment has ALREADY been applied this month
-            # We look for any transaction this month with the exact recurring description
-            cursor_exp.execute("SELECT COUNT(*) FROM transactions WHERE description = ? AND date LIKE ?", 
-                               (description, f'{current_month_prefix}%'))
-            
-            if cursor_exp.fetchone()[0] == 0:
-                # Payment is due AND has not been recorded this month. Apply it.
-                cursor_exp.execute("INSERT INTO transactions (amount, category, description, date, type) VALUES (?, ?, ?, ?, ?)",
-                                   (amount, category, description, current_date_str, 'expense'))
-                applied_templates.append(f"'{name}' (£{amount:,.2f})")
-                
-    conn_exp.commit()
-    conn_exp.close()
-    
-    if applied_templates:
-        return f"[bold green]AUTOMATICALLY APPLIED PAYMENTS:[/bold green] {', '.join(applied_templates)}"
-    return None # No automatic payment was made
-
-# --- Main Application Loop ---
 
 def main():
-    """The main entry point for the Budget Buddy TUI."""
     initialize_db()
     db_check_and_migrate()
-    message = "Welcome to Budget Buddy TUI! Ready for action."
+    msg = check_and_apply_recurring_payments() or "Welcome!"
     
-    # Run automation check right after initialization
-    auto_message = check_and_apply_recurring_payments()
-    if auto_message:
-        # Prepend the automated message to the welcome message
-        message = f"{auto_message}\n{message}"
-
     while True:
-        # CRITICAL FIX: Use os.system('clear') before every dashboard redraw 
-        # for maximum compatibility and to eliminate screen ghosting.
         os.system('cls' if os.name == 'nt' else 'clear')
+        choice = display_dashboard(message=msg)
+        msg = ""
         
-        choice = display_dashboard(message)
-        message = "" # Reset message after display
+        if choice == '1': msg = add_transaction()
+        elif choice == '2': msg = view_transactions_paginated() # Calls the new card view
+        elif choice == '3': msg = filter_by_category()
+        elif choice == '4': weekly_summary()
+        elif choice == '5': monthly_summary()
+        elif choice == '6': upcoming_calendar()
+        elif choice == '7': msg = delete_transaction()
+        elif choice == '8': msg = set_savings_goal()
+        elif choice == '9': msg = add_to_savings()
+        elif choice == '10': msg = manage_recurring_templates()
+        elif choice == '11': msg = apply_recurring_template()
+        elif choice == '12': break
+        elif choice == '13': msg = manage_categories_full()
+        else: msg = "[red]Invalid.[/red]"
 
-        try:
-            # We rely on string input for this loop, though some commands expect an int
-            if choice.upper() == 'C':
-                message = "[yellow]Action cancelled.[/yellow]"
-                continue
-                
-            choice_int = int(choice)
-        except ValueError:
-            message = "[bold red]Invalid input. Please enter a number between 1 and 13.[/bold red]"
-            continue
-
-        # Execute the chosen action
-        if choice_int == 1:
-            message = add_transaction()
-        elif choice_int == 2:
-            table, title = view_transactions()
-            show_temporary_view(title, table)
-        elif choice_int == 3:
-            message = filter_by_category() # Handles its own view/pause
-        elif choice_int == 4:
-            weekly_summary() # Handles its own view/pause
-        elif choice_int == 5:
-            monthly_summary() # Handles its own view/pause
-        elif choice_int == 6:
-            upcoming_calendar() # Handles its own view/pause
-        elif choice_int == 7:
-            message = delete_transaction()
-        elif choice_int == 8:
-            message = set_savings_goal()
-        elif choice_int == 9:
-            message = add_to_savings()
-        elif choice_int == 10:
-            message = manage_recurring_templates()
-        elif choice_int == 11:
-            message = apply_recurring_template()
-        elif choice_int == 12:
-            CONSOLE.print(Panel(Text("Thank you for using Budget Buddy. Goodbye!", style="bold magenta"), border_style="magenta"))
-            break
-        elif choice_int == 13: # New Option for Category Management
-            message = manage_categories()
-        else:
-            message = "[bold red]Invalid option. Please enter a number between 1 and 13.[/bold red]"
-        
-        # The main loop continues, and the first line of the loop will always run CONSOLE.clear() again.
-
-if __name__ == '__main__':
+if __name__ == "__main__":
     main()
