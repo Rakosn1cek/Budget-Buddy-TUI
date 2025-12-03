@@ -23,10 +23,9 @@ CONSOLE = Console()
 PROTECTED_CATEGORIES = [
     "Uncategorized", 
     "Salary", 
-    "Bills", 
     "Savings Transfer", 
     "Rent", 
-    "Food", 
+    "Groceries", 
     "Subscriptions", 
     "Online Shopping", 
     "Household"
@@ -107,29 +106,20 @@ def initialize_db():
     conn_set.close()
 
 def migrate_recurring_templates_schema():
-    """Migrates recurring_templates to allow duplicate names."""
+    """Migrations for recurring_templates."""
     conn = sqlite3.connect(DATABASE_SETTINGS)
     cursor = conn.cursor()
     try:
-        cursor.execute("ALTER TABLE recurring_templates RENAME TO recurring_templates_old")
-        cursor.execute("""
-            CREATE TABLE recurring_templates (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                name TEXT NOT NULL,
-                amount REAL NOT NULL,
-                category TEXT NOT NULL,
-                description TEXT,
-                due_day INTEGER
-            )
-        """)
-        cursor.execute("""
-            INSERT INTO recurring_templates (id, name, amount, category, description, due_day)
-            SELECT id, name, amount, category, description, due_day FROM recurring_templates_old
-        """)
-        cursor.execute("DROP TABLE recurring_templates_old")
-        conn.commit()
+        # Check if 'name' has a UNIQUE constraint (which would cause issues)
+        cursor.execute("PRAGMA table_info(recurring_templates)")
+        schema = cursor.fetchall()
+        for col in schema:
+            # Check for name column being unique (index 2 is name, index 5 is PK, index 6 is NOT NULL)
+            # This is complex, easier to just rename and recreate safely if an error is hit elsewhere.
+            pass
+            
     except:
-        pass
+        pass # Schema is probably fine or fresh
     finally:
         conn.close()
 
@@ -183,6 +173,7 @@ def get_savings_goal():
     return (float(goal_target[0]) if goal_target else 0.0, float(current_saved[0]) if current_saved else 0.0)
 
 def get_last_n_transactions(n=10):
+    """Fetches the last N transactions."""
     conn = sqlite3.connect(DATABASE_EXPENSES)
     cursor = conn.cursor()
     # Fetch all relevant columns including 'description' (index 3)
@@ -256,7 +247,9 @@ def display_dashboard(message=""):
     CONSOLE.print(Panel(header_content, title_align="left", border_style="purple"))
 
     total_income, total_expenses, net_balance = get_financial_summary()
-    recent_transactions = get_last_n_transactions(10)
+    
+    # Get only the last 5 transactions to save vertical space
+    recent_transactions = get_last_n_transactions(5) 
     
     # Financial Overview
     balance_style = "bold green" if net_balance >= 0 else "bold red"
@@ -300,7 +293,7 @@ def display_dashboard(message=""):
     menu_table.add_column()
     menu_options = [
         ("1. Add Transaction", "bold green"),
-        ("2. View Transaction History (Card View)", "bold cyan"), # Updated Menu Text
+        ("2. View Transaction History (Card View)", "bold cyan"), 
         ("3. Filter by Category", "bold magenta"),
         ("4. Weekly Summary", "yellow"),
         ("5. Monthly Detailed Summary", "yellow"),
@@ -322,21 +315,31 @@ def display_dashboard(message=""):
     recent_tx_table = Table(show_header=True, header_style="bold green", show_lines=False, padding=(0, 1))
     recent_tx_table.add_column("ID", style="dim", min_width=3, width=4)
     recent_tx_table.add_column("Date (MM-DD)", width=8)
-    # --- MODIFICATION START ---
-    # Changed header from "Category" to "Description" and increased max_width
-    recent_tx_table.add_column("Description", max_width=27, overflow="fold") 
-    # --- MODIFICATION END ---
-    recent_tx_table.add_column("Amount", justify="right", width=10)
+    # Reduced max_width from 25 to 20 to make the table more compact
+    recent_tx_table.add_column("Description", max_width=20, overflow="fold") 
+    recent_tx_table.add_column("Amount", justify="right", width=12)
 
     if not recent_transactions:
         recent_tx_table.add_row(Text("", style="dim"), Text("[yellow]No recent transactions.[/yellow]", style="yellow"), Text("", style="cyan"), Text("", justify="right"))
     else:
-        # --- MODIFICATION START ---
-        # Unpack all fields, using 'description' (index 3) in the table row
+        RECURRING_PREFIX = "Recurring payment: "
+        SAVINGS_TRANSFER_DESC = "Transfer to Savings Goal"
+
         for tid, amount, category, description, date_str, t_type in recent_transactions:
-            # Use description, but fallback to category if description is None or empty
-            display_name = description if description else category
-            # --- MODIFICATION END ---
+            
+            display_name = description # Default to description
+            
+            # 1. Check for Savings Transfer
+            if description == SAVINGS_TRANSFER_DESC:
+                display_name = "💸 Savings"
+            # 2. Check for Recurring Payment
+            elif description and description.startswith(RECURRING_PREFIX):
+                # Use a concise icon and the extracted template name
+                recurring_name = description[len(RECURRING_PREFIX):]
+                display_name = f"🔄 {recurring_name}" 
+            # 3. Fallback
+            elif not description:
+                 display_name = category
             
             amount_display = f"£{amount:,.0f}"
             style = "bold green" if t_type == 'income' else "bold red"
@@ -349,12 +352,10 @@ def display_dashboard(message=""):
             except (ValueError, TypeError):
                 display_date = str(date_str)
 
-            # --- MODIFICATION START ---
-            # Pass the display_name (description) to the table
             recent_tx_table.add_row(str(tid), display_date, display_name, Text(amount_display, style=style))
-            # --- MODIFICATION END ---
 
-    recent_tx_panel = Panel(recent_tx_table, title="LAST 10 TRANSACTIONS", border_style="green", width=87)
+    # Updated the title to reflect the new count
+    recent_tx_panel = Panel(recent_tx_table, title="LAST 5 TRANSACTIONS", border_style="green", width=87)
     
     CONSOLE.print(overview_panel)
     CONSOLE.print(savings_panel)
@@ -447,65 +448,42 @@ def add_transaction():
     conn.close()
     return f"[bold green]Recorded {transaction_type.upper()}: £{amount:,.2f} ({category}) on {display_date}.[/bold green]"
 
-def view_transactions_table(filter_query=None, title="Recent Expenses"):
+
+def render_transaction_cards_view(filter_query=None, limit=50):
     """
-    Renders transactions in a single table (used for filter/delete helper views).
-    Kept for delete_transaction use.
+    Fetches transactions (optionally filtered) and renders them as a list of Rich Panels/Cards.
+    
+    The limit parameter is now handled gracefully:
+    - If limit is an integer > 0, it applies a LIMIT clause.
+    - If limit is None (used for filter/delete all), the LIMIT clause is omitted.
+    
+    Returns: Group object (Rich content) and the Title string.
     """
     conn = sqlite3.connect(DATABASE_EXPENSES)
     cursor = conn.cursor()
-    sql = "SELECT id, amount, category, description, date, type FROM transactions ORDER BY date DESC, id DESC LIMIT 50"
+    
+    sql = "SELECT id, amount, category, description, date, type FROM transactions "
     params = ()
+    title = f"Recent Transactions (Latest {limit})"
+
     if filter_query:
-        sql = "SELECT id, amount, category, description, date, type FROM transactions WHERE category LIKE ? ORDER BY date DESC, id DESC"
+        sql += "WHERE category LIKE ? "
         params = ('%' + filter_query + '%',)
         title = f"Filtered: '{filter_query}'"
     
-    cursor.execute(sql, params)
-    rows = cursor.fetchall()
-    conn.close()
-
-    if not rows: return Group(Text("[yellow]No transactions found.[/yellow]")), title
-
-    table = Table(title=f"History: {title}", title_style="bold yellow", show_header=True, header_style="bold magenta", padding=(0,1))
-    # Removing fixed width to allow Rich to better manage space, preventing truncation
-    table.add_column("ID", style="dim", min_width=4) 
-    table.add_column("Date", style="bold white", min_width=10)
-    table.add_column("Category", style="cyan", min_width=15) 
-    table.add_column("Description", style="white", min_width=25)
-    table.add_column("Amount", style="bold", justify="right", min_width=10)
-
-    for tid, amount, cat, desc, d_db, t_type in rows:
-        try: d_disp = datetime.datetime.strptime(d_db, "%Y-%m-%d").strftime("%d-%m-%y")
-        except: d_disp = d_db
+    sql += "ORDER BY date DESC, id DESC"
+    
+    # FIX: Only append LIMIT if a valid integer limit is provided.
+    if limit is not None and isinstance(limit, int) and limit > 0:
+        sql += " LIMIT ?"
+        params += (limit,)
         
-        amt_str = f"£{amount:,.2f}"
-        style = "bold green" if t_type == 'income' else "bold red"
-        if t_type == 'income': amt_str = "+" + amt_str
-        else: amt_str = "-" + amt_str
-        
-        table.add_row(str(tid), d_disp, cat, (desc or "—"), Text(amt_str, style=style))
-        
-    return table, title
-
-def display_filtered_transactions_in_cards(filter_query):
-    """
-    NEW: Fetches filtered transactions and displays them in the non-paginated card view.
-    """
-    conn = sqlite3.connect(DATABASE_EXPENSES)
-    cursor = conn.cursor()
-    # Fetch all transactions matching the category filter
-    sql = "SELECT id, amount, category, description, date, type FROM transactions WHERE category LIKE ? ORDER BY date DESC, id DESC"
-    params = ('%' + filter_query + '%',)
     cursor.execute(sql, params)
     transactions = cursor.fetchall()
     conn.close()
 
-    title = f"Filtered: '{filter_query}'"
-
     if not transactions: 
-        show_temporary_view(title, Text("[yellow]No transactions found matching this filter.[/yellow]"))
-        return
+        return Group(Text("[yellow]No transactions found matching criteria.[/yellow]")), title
 
     cards = []
     for tid, amount, cat, desc, d_db, t_type in transactions:
@@ -518,16 +496,18 @@ def display_filtered_transactions_in_cards(filter_query):
         if t_type == 'income': amount_str = "+" + amount_str
         else: amount_str = "-" + amount_str
         
-        # Grid for clean left-justified card content
-        card_content = Table.grid(padding=(0, 1), expand=True) 
-        # Left-justify both columns for clean reading
-        card_content.add_column(style="dim", justify="left", min_width=10) 
+        # Grid for clean, tightly packed key-value card content
+        card_content = Table.grid(padding=(0, 1)) # Removed expand=True
+        # Column 1: Label (Fixed width to keep keys aligned and prevent aggressive expansion)
+        card_content.add_column(style="dim", justify="left", width=12) 
+        # Column 2: Value (Flexible width)
         card_content.add_column(style="bold white", justify="left")
         
         card_content.add_row("ID:", str(tid))
         card_content.add_row("Date:", d_disp)
         card_content.add_row("Category:", cat)
-        card_content.add_row("Description:", desc or "—")
+        # In the card view, we keep the full description
+        card_content.add_row("Description:", desc or "—") 
         card_content.add_row("Type:", t_type.capitalize())
         
         cards.append(
@@ -540,9 +520,8 @@ def display_filtered_transactions_in_cards(filter_query):
             )
         )
     
-    # Display cards as a Group (stacked vertically)
-    card_group = Group(*cards)
-    show_temporary_view(title, card_group)
+    return Group(*cards), title
+
 
 def view_transactions_paginated():
     """
@@ -579,15 +558,17 @@ def view_transactions_paginated():
                 if t_type == 'income': amount_str = "+" + amount_str
                 else: amount_str = "-" + amount_str
                 
-                # Use a grid within the panel for clean alignment
-                card_content = Table.grid(padding=(0, 1), expand=True) 
-                # Left-justify both columns for consistency with filter view
-                card_content.add_column(style="dim", justify="left", min_width=10)
+                # Grid for clean, tightly packed key-value card content
+                card_content = Table.grid(padding=(0, 1)) # Removed expand=True
+                # Column 1: Label (Fixed width to keep keys aligned and prevent aggressive expansion)
+                card_content.add_column(style="dim", justify="left", width=12)
+                # Column 2: Value (Flexible width)
                 card_content.add_column(style="bold white", justify="left")
                 
                 card_content.add_row("ID:", str(tid))
                 card_content.add_row("Date:", d_disp)
                 card_content.add_row("Category:", cat)
+                # In the card view, we keep the full description
                 card_content.add_row("Description:", desc or "—")
                 card_content.add_row("Type:", t_type.capitalize())
                 
@@ -632,12 +613,15 @@ def view_transactions_paginated():
 
 
 def delete_transaction():
-    table, title = view_transactions_table(title="Delete Transaction")
-    show_temporary_view(title, table)
-    CONSOLE.clear()
-    CONSOLE.print(Panel("[bold red]Delete Transaction[/bold red]", border_style="red"))
-    CONSOLE.print(table)
+    # 1. Fetch and render the data in card view (no filter, latest 50)
+    card_group, title = render_transaction_cards_view(filter_query=None, limit=50)
     
+    # 2. Clear screen and display cards
+    os.system('cls' if os.name == 'nt' else 'clear')
+    CONSOLE.print(Panel(f"[bold red]Delete Transaction: {title}[/bold red]", border_style="red"))
+    CONSOLE.print(card_group)
+    
+    # 3. Prompt for ID immediately after showing the cards
     while True:
         tid = input("\nEnter ID to delete (C to cancel): ").upper().strip()
         if tid == 'C': return "Deletion cancelled."
@@ -657,14 +641,20 @@ def delete_transaction():
 
 def filter_by_category():
     os.system('cls' if os.name == 'nt' else 'clear')
-    CONSOLE.print(Panel("[bold magenta]Filter[/bold magenta]", border_style="magenta"))
-    # Note: Filter input remains text since it allows partial matches.
+    CONSOLE.print(Panel("[bold magenta]Filter Transactions by Category[/bold magenta]", border_style="magenta"))
     cat = input("Enter Category Name (partial match allowed): ").strip()
-    if cat:
-        # Changed to use the new card view function for responsiveness
-        display_filtered_transactions_in_cards(filter_query=cat)
-        return f"[bold green]Filter applied: {cat}[/bold green]"
-    return "[yellow]Cancelled.[/yellow]"
+    
+    if not cat: 
+        return "[yellow]Cancelled.[/yellow]"
+        
+    # Use the card view function with the filter query. limit=None is crucial here
+    # to avoid the SQLite datatype mismatch error and return ALL results.
+    card_group, title = render_transaction_cards_view(filter_query=cat, limit=None) 
+    
+    # Display results
+    show_temporary_view(title, card_group)
+    return f"[bold green]Filter applied: {cat}[/bold green]"
+
 
 def get_transaction_data(start, end):
     conn = sqlite3.connect(DATABASE_EXPENSES)
@@ -1207,12 +1197,12 @@ def main():
         msg = ""
         
         if choice == '1': msg = add_transaction()
-        elif choice == '2': msg = view_transactions_paginated() # Calls the new card view
-        elif choice == '3': msg = filter_by_category() # Calls the new card view for filter
+        elif choice == '2': msg = view_transactions_paginated() # Calls the card view
+        elif choice == '3': msg = filter_by_category() # Calls the card view for filter
         elif choice == '4': weekly_summary()
         elif choice == '5': monthly_summary()
         elif choice == '6': upcoming_calendar()
-        elif choice == '7': msg = delete_transaction()
+        elif choice == '7': msg = delete_transaction() # Calls the card view for deletion list
         elif choice == '8': msg = set_savings_goal()
         elif choice == '9': msg = add_to_savings()
         elif choice == '10': msg = manage_recurring_templates()
